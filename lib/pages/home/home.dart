@@ -101,11 +101,15 @@ class _HomePageState extends State<HomePage> {
                   // 팝업 띄우기
                   await AdjustedVolumeDialog.show(
                     context,
-                    title: '건강 상태를 고려해 오늘 배송물량이 조정되었습니다.',
-                    description:
-                        '무리 없이 일하실 수 있도록\n배정건수가 $before → $after건으로 감소되었습니다.',
+                    title: '건강 상태를 고려해 오늘 배송물량이',
+                    titleLine2: '조정 되었습니다.',
+                    description: '무리 없이 일하실 수 있도록',
+                    before: before, // ✅ 숫자 전달
+                    after: after, // ✅ 숫자 전달
                     iconColor: const Color(0xFF61D5AB),
                     width: 340,
+                    // height: 160,
+                    // contentHeight: 90,
                   );
 
                   // TODO(임시 미리보기): 알림 페이지 갱신 예시 — 필요 없으면 아래 3줄 삭제

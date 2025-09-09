@@ -9,28 +9,27 @@ class AdjustedVolumePreviewPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final alarm = Get.find<AlarmController>(); // 전역 등록되어 있다고 가정
+    final alarm = Get.find<AlarmController>();
 
     return Scaffold(
       appBar: AppBar(title: const Text('물량 조정 팝업 미리보기')),
       body: Center(
         child: ElevatedButton(
           onPressed: () async {
-            // 예: DB에서 300 → 230으로 변경되었다고 가정
             const int before = 300;
             const int after = 230;
 
-            // 팝업 띄lo우기
             await AdjustedVolumeDialog.show(
               context,
-              title: '건강 상태를 고려해 오늘 배송물량이 조정되었습니다.',
-              description:
-                  '무리 없이 일하실 수 있도록\n배정건수가 $before → $after건으로 감소되었습니다.',
+              title: '건강 상태를 고려해 오늘 배송물량이',
+              titleLine2: '조정 되었습니다.',
+              description: '무리 없이 일하실 수 있도록',
+              before: before,
+              after: after,
               iconColor: const Color(0xFF61D5AB),
               width: 340,
             );
 
-            // 알림 리스트에 추가 (알림 페이지에 바로 반영됨)
             alarm.addAlarm(
               AlarmItem(title: '배송물량이 조정되었습니다.', subtitle: '$before → $after건'),
             );
