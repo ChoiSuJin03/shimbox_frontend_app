@@ -10,9 +10,11 @@ import 'package:shimbox_app/utils/firebase_uploader.dart';
 import '../../utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 
+import 'package:shimbox_app/controllers/alarm_controller.dart';
+import 'package:shimbox_app/models/alarm_item.dart';
+
 class DeliveryDetailPage extends StatefulWidget {
   final Map<String, dynamic> area;
-
   const DeliveryDetailPage({super.key, required this.area});
 
   @override
@@ -21,10 +23,12 @@ class DeliveryDetailPage extends StatefulWidget {
 
 class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   int? expandedIndex;
-
   List<List<int>> deliveryStatus = [];
   List<Map<String, dynamic>> deliveryAreas = [];
   bool isLoading = true;
+
+  final AlarmController alarmController =
+      Get.find<AlarmController>(); // ✅ find만!
 
   @override
   void initState() {
@@ -33,8 +37,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
       final prefs = await SharedPreferences.getInstance();
       final savedToken = prefs.getString('token');
       localUser.UserData.token = savedToken;
-      print('📦 DeliveryDetailPage에서 토큰 로드: $savedToken');
-
       fetchData();
     });
   }
@@ -66,8 +68,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
 
         isLoading = false;
       });
-    } catch (e) {
-      print('Error loading delivery data: $e');
+    } catch (_) {
       setState(() => isLoading = false);
     }
   }
@@ -83,13 +84,29 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     }
   }
 
+  /// 현재 화면 데이터에서 status==1(배송시작)인 첫 건을 찾아 주소/이름 반환
+  Map<String, String>? _findActiveDeliveryInfo() {
+    for (int a = 0; a < deliveryAreas.length; a++) {
+      final products = deliveryAreas[a]['products'] as List;
+      for (int p = 0; p < products.length; p++) {
+        if (deliveryStatus[a][p] == 1) {
+          final prod = products[p] as Map<String, dynamic>;
+          final addr = '${prod['address']} ${prod['detailAddress']}';
+          final name = '${prod['recipientName']}';
+          return {'address': addr, 'name': name};
+        }
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text(
           '${widget.area['name']} 배달 건',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -99,9 +116,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
           padding: const EdgeInsets.only(left: 37),
           child: Center(
             child: GestureDetector(
-              onTap: () {
-                Get.find<BottomNavController>().changeBottomNav(0);
-              },
+              onTap: () => Get.find<BottomNavController>().changeBottomNav(0),
               child: SizedBox(
                 width: 20,
                 height: 20,
@@ -116,7 +131,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
       ),
       body:
           isLoading
-              ? Center(child: CircularProgressIndicator())
+              ? const Center(child: CircularProgressIndicator())
               : Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 36,
@@ -143,7 +158,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                                   width: 48,
                                   height: 48,
                                   decoration: BoxDecoration(
-                                    color: Color(0xFFF4F4F4),
+                                    color: const Color(0xFFF4F4F4),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Center(
@@ -151,11 +166,11 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                                       'assets/images/home/marker.svg',
                                       width: 24,
                                       height: 24,
-                                      color: Color(0xFF61D5AB),
+                                      color: const Color(0xFF61D5AB),
                                     ),
                                   ),
                                 ),
-                                SizedBox(width: 12),
+                                const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
                                     crossAxisAlignment:
@@ -163,15 +178,15 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                                     children: [
                                       Text(
                                         '${item['name']}',
-                                        style: TextStyle(
+                                        style: const TextStyle(
                                           fontWeight: FontWeight.bold,
                                           fontSize: 16,
                                         ),
                                       ),
-                                      SizedBox(height: 4),
+                                      const SizedBox(height: 4),
                                       Text(
                                         '${item['total']}건',
-                                        style: TextStyle(
+                                        style: const TextStyle(
                                           color: Colors.grey,
                                           fontSize: 14,
                                         ),
@@ -189,10 +204,10 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                           ),
                         ),
                         if (isExpanded) ...[
-                          SizedBox(height: 10),
+                          const SizedBox(height: 10),
                           _buildDropdownContent(index, item),
                         ],
-                        SizedBox(height: 12),
+                        const SizedBox(height: 12),
                       ],
                     );
                   },
@@ -207,8 +222,9 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
       children: List.generate(item['products'].length, (i) {
         final product = item['products'][i];
         final status = deliveryStatus[areaIndex][i];
-        final textColor = status == 2 ? Color(0xFF7A7A7A) : Colors.black;
-        final iconColor = status == 2 ? Color(0xFF7A7A7A) : Color(0xFF61D5AB);
+        final textColor = status == 2 ? const Color(0xFF7A7A7A) : Colors.black;
+        final iconColor =
+            status == 2 ? const Color(0xFF7A7A7A) : const Color(0xFF61D5AB);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -240,7 +256,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                   height: 20,
                   color: iconColor,
                 ),
-                SizedBox(width: 12),
+                const SizedBox(width: 12),
                 GestureDetector(
                   onTap:
                       () => startNaviToAddressWithNaver(
@@ -255,17 +271,12 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 ),
               ],
             ),
-            SizedBox(height: 8),
-            // Text(
-            // '예상 도착 시간: ${product['estimatedArrivalTime']}',
-            // style: TextStyle(color: textColor, fontSize: 14),
-            // ),
-            SizedBox(height: 16),
+            const SizedBox(height: 16),
             _buildStatusButton(areaIndex, i, status, product),
-            SizedBox(height: 24),
+            const SizedBox(height: 24),
             if (i < item['products'].length - 1)
               Divider(color: Colors.grey[300], height: 1),
-            SizedBox(height: 24),
+            const SizedBox(height: 24),
           ],
         );
       }),
@@ -282,9 +293,9 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
       return OutlinedButton(
         onPressed: null,
         style: OutlinedButton.styleFrom(
-          foregroundColor: Color(0xFFAAAAAA),
-          side: BorderSide(color: Color(0xFFAAAAAA)),
-          minimumSize: Size(double.infinity, 48),
+          foregroundColor: const Color(0xFFAAAAAA),
+          side: const BorderSide(color: Color(0xFFAAAAAA)),
+          minimumSize: const Size(double.infinity, 48),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(30),
           ),
@@ -297,33 +308,27 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
               'assets/images/delivery/complete.svg',
               width: 20,
               height: 20,
-              color: Color(0xFFAAAAAA),
+              color: const Color(0xFFAAAAAA),
             ),
-            SizedBox(width: 8),
-            Text('배송 완료', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(width: 8),
+            const Text('배송 완료', style: TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
       );
     } else if (status == 1) {
       return ElevatedButton(
         onPressed: () async {
-          // 👉 먼저 서버에 상태를 배송완료로 업데이트
-          final statusUpdated = await ApiService.updateProductStatus(
+          final ok = await ApiService.updateProductStatus(
             product['productId'],
             '배송완료',
           );
-
-          if (!statusUpdated) {
+          if (!ok) {
             ScaffoldMessenger.of(
               context,
-            ).showSnackBar(SnackBar(content: Text('배송완료 상태 전환 실패')));
+            ).showSnackBar(const SnackBar(content: Text('배송완료 상태 전환 실패')));
             return;
           }
-
-          // 👉 서버 반영을 조금 기다림
-          await Future.delayed(Duration(milliseconds: 700));
-
-          // 👉 상태 전환 성공하면 카메라 모달 띄움
+          await Future.delayed(const Duration(milliseconds: 700));
           await showDialog(
             context: context,
             useRootNavigator: false,
@@ -336,39 +341,21 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                       image,
                       folder: 'deliveries',
                     );
-
-                    print('🧪 Firebase 업로드된 URL: $url');
-
                     if (url != null) {
                       final smsText = '배송이 완료되었습니다.\n사진 확인: $url';
                       final uri = Uri.parse(
                         'sms:${product['recipientPhone']}?body=${Uri.encodeComponent(smsText)}',
                       );
-
-                      if (await canLaunchUrl(uri)) {
-                        await launchUrl(uri);
-                      }
-
-                      final imgSuccess = await ApiService.sendDeliveryImage(
+                      if (await canLaunchUrl(uri)) await launchUrl(uri);
+                      final imgOk = await ApiService.sendDeliveryImage(
                         productId: product['productId'],
                         imageUrl: url,
                       );
-
-                      if (imgSuccess) {
-                        // 📌 이 위치에서 setState 호출하는 것이 안전함
-                        if (mounted) {
-                          setState(() {
-                            deliveryStatus[areaIndex][i] = 2;
-                          });
-                        }
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('이미지 URL 저장 실패')),
-                        );
-                      }
+                      if (imgOk && mounted)
+                        setState(() => deliveryStatus[areaIndex][i] = 2);
                     } else {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Firebase 업로드 실패')),
+                        const SnackBar(content: Text('Firebase 업로드 실패')),
                       );
                     }
                   },
@@ -376,50 +363,181 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
           );
         },
         style: ElevatedButton.styleFrom(
-          backgroundColor: Color(0xFF61D5AB),
+          backgroundColor: const Color(0xFF61D5AB),
           foregroundColor: Colors.white,
-          minimumSize: Size(double.infinity, 48),
+          minimumSize: const Size(double.infinity, 48),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(30),
           ),
         ),
-        child: Text('배송 도착', style: TextStyle(fontWeight: FontWeight.bold)),
+        child: const Text(
+          '배송 도착',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
       );
     } else {
       return OutlinedButton(
         onPressed: () async {
+          // 이미 진행 중인(배송시작) 건이 있는지 확인
+          final active = _findActiveDeliveryInfo();
+          if (active != null) {
+            final activeAddr = active['address']!;
+            alarmController.addAlarm(
+              AlarmItem(
+                title: '배송완료를 눌렀는지 확인해주세요',
+                subtitle: activeAddr, // ✅ “배송시작으로 켜져 있는 주소”를 표시
+              ),
+            );
+            // (팝업) 알림 보기 → 알림 페이지로 이동
+            await showDialog(
+              context: context,
+              builder: (_) {
+                // 원하는 사이즈
+                const double dialogWidth = 360; // <- 가로
+                const double contentHeight = 120; // <- 내용 영역 높이
+
+                return Center(
+                  // <= AlertDialog를 원하는 폭으로 제한
+                  child: SizedBox(
+                    width: dialogWidth,
+                    child: AlertDialog(
+                      // ✅ 둥글기/외곽선/클립
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10), // ← 원하는 반경으로
+                        // side: const BorderSide(color: Color(0xFFEAEAEA), width: 1), // (선택) 테두리
+                      ),
+                      clipBehavior: Clip.antiAlias, // 내용도 둥근 모서리에 맞게 잘라줌
+                      // 색/그림자
+                      backgroundColor: Colors.white,
+                      // elevation: 50,
+
+                      // 바깥 여백(화면과 다이얼로그 사이)
+                      insetPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 24,
+                      ),
+
+                      // 타이틀/컨텐트 패딩
+                      titlePadding: const EdgeInsets.fromLTRB(27, 30, 24, 0),
+                      contentPadding: const EdgeInsets.fromLTRB(27, 13, 24, 20),
+
+                      // 🔶 경고 아이콘(좌) + X 버튼(우, 살짝 위)
+                      title: SizedBox(
+                        height: 35,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: SvgPicture.asset(
+                                'assets/images/icons/warning.svg',
+                                width: 35,
+                                height: 34,
+                                theme: const SvgTheme(
+                                  currentColor: Color.fromARGB(255, 199, 20, 0),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              right: 0,
+                              top: -15,
+                              child: IconButton(
+                                visualDensity: VisualDensity.compact,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                icon: const Icon(
+                                  Icons.close,
+                                  size: 22,
+                                  color: Color(0xFF777777),
+                                ),
+                                onPressed: () => Navigator.of(context).pop(),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // ✅ 내용 높이 고정 + 스크롤 가능
+                      content: SizedBox(
+                        height: contentHeight,
+                        child: SingleChildScrollView(
+                          child: Text.rich(
+                            TextSpan(
+                              children: [
+                                TextSpan(
+                                  text: '다른 주소에서 이미 배송을 시작했습니다.\n',
+                                  style: const TextStyle(
+                                    fontSize: 15, // ← 크기 업
+                                    fontWeight: FontWeight.w700, // ← 진하게
+                                    height: 1.4,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                                const TextSpan(
+                                  text: '이전 건에서 "배송 도착"을 먼저 눌러 주세요.\n\n',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    height: 1.5,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: '진행 중인 주소 : $activeAddr',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    height: 1.5,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            textAlign: TextAlign.left,
+                          ),
+                        ),
+                      ),
+
+                      // actions 생략하면 하단 버튼 영역 없음 (필요하면 추가)
+                    ),
+                  ),
+                );
+              },
+            );
+
+            return;
+          }
+
+          // 정상 처리
           showDialog(
             context: context,
             barrierDismissible: false,
-            builder: (_) => Center(child: CircularProgressIndicator()),
+            builder: (_) => const Center(child: CircularProgressIndicator()),
           );
-          final success = await ApiService.updateProductStatus(
+          final ok = await ApiService.updateProductStatus(
             product['productId'],
             '배송시작',
           );
           Navigator.of(context).pop();
-
-          if (success) {
-            await Future.delayed(Duration(seconds: 1)); // 아주 약간 대기
-
-            setState(() {
-              deliveryStatus[areaIndex][i] = 1;
-            });
+          if (ok) {
+            await Future.delayed(const Duration(seconds: 1));
+            setState(() => deliveryStatus[areaIndex][i] = 1);
           } else {
             ScaffoldMessenger.of(
               context,
-            ).showSnackBar(SnackBar(content: Text('배송 시작 처리에 실패했습니다.')));
+            ).showSnackBar(const SnackBar(content: Text('배송 시작 처리에 실패했습니다.')));
           }
         },
         style: OutlinedButton.styleFrom(
-          foregroundColor: Color(0xFF61D5AB),
-          side: BorderSide(color: Color(0xFF61D5AB)),
-          minimumSize: Size(double.infinity, 48),
+          foregroundColor: const Color(0xFF61D5AB),
+          side: const BorderSide(color: Color(0xFF61D5AB)),
+          minimumSize: const Size(double.infinity, 48),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(30),
           ),
         ),
-        child: Text('배송 시작', style: TextStyle(fontWeight: FontWeight.bold)),
+        child: const Text(
+          '배송 시작',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
       );
     }
   }
