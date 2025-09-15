@@ -48,3 +48,18 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Android build
+android/app/build/
+android/.gradle/
+android/build/
+
+# iOS build
+ios/Pods/
+ios/.symlinks/
+ios/build/
+
+# Flutter build
+build/
+.flutter-plugins
+.flutter-plugins-dependencies

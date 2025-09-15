@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="gcm_defaultSenderId" translatable="false">337576916905</string>
-    <string name="google_api_key" translatable="false">AIzaSyABqSVMnRty7USR-XkC5kRXbqzS4Op5-IQ</string>
-    <string name="google_app_id" translatable="false">1:337576916905:android:b70fcd25c23e4ac60ab6b8</string>
-    <string name="google_crash_reporting_api_key" translatable="false">AIzaSyABqSVMnRty7USR-XkC5kRXbqzS4Op5-IQ</string>
-    <string name="google_storage_bucket" translatable="false">shimbox.firebasestorage.app</string>
-    <string name="project_id" translatable="false">shimbox</string>
-</resources>
