@@ -14,7 +14,6 @@ class BottomNavController extends GetxController {
   var isCheckedOut = false.obs;
   var checkOutTime = ''.obs;
 
-  // ✅ 내부 Navigator 관리용 key 추가
   final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
   void changeBottomNav(int value) {
@@ -22,9 +21,11 @@ class BottomNavController extends GetxController {
     selectedArea.value = null;
   }
 
-  // ✅ 이제 tab 전환 대신 push
-  void goToDeliveryDetail(Map<String, dynamic> area) {
-    selectedArea.value = area;
-    pageIndex.value = 3; // 상세 페이지 인덱스
+  /// 상세로 push 하고 결과(bool?)를 반환. (Future가 null일 수 있어 ?? 로 보정)
+  Future<bool?> goToDeliveryDetail(Map<String, dynamic> area) {
+    final future = Get.to<bool>(
+      () => DeliveryDetailPage(area: area),
+    ); // Future<bool?>?
+    return future ?? Future.value(null); // <- 핵심!
   }
 }
