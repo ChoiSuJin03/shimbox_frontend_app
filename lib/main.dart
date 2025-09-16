@@ -2,6 +2,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
+import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/pages/main_scaffold.dart';
 import 'package:shimbox_app/pages/signup/signup_detail.dart';
 import 'package:shimbox_app/pages/signup/signup_experience.dart';
@@ -32,12 +33,16 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 
+import 'controllers/alarm_controller.dart';
+import 'package:get/get.dart';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized(); // 한 번만 호출!
   await Firebase.initializeApp(); // Firebase 초기화
 
   // final prefs = await SharedPreferences.getInstance();
   // localUser.UserData.token = prefs.getString('token');
+  Get.put(AlarmController(), permanent: true);
 
   runApp(const MyApp());
 }
@@ -67,6 +72,8 @@ class MyApp extends StatelessWidget {
         GetPage(name: '/wearable', page: () => WearablePage()),
         // GetPage(name: '/main', page: () => HomePage()),
         GetPage(name: '/main', page: () => MainScaffold()),
+        // GetPage(name: '/alarmPage', page: () => AlarmPage()),
+        GetPage(name: '/alarmPage', page: () => const AlarmPage()),
       ],
     );
   }

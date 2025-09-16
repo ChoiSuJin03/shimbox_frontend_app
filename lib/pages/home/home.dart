@@ -1,4 +1,10 @@
+import 'package:shimbox_app/pages/alarm/alarm.dart';
+
 import 'survey_module.dart';
+
+import 'package:shimbox_app/models/adjusted_volume_dialog.dart'; // TODO(임시 미리보기): 나중에 삭제 가능
+import 'package:shimbox_app/controllers/alarm_controller.dart'; // TODO(임시 미리보기)
+import 'package:shimbox_app/models/alarm_item.dart'; // TODO(임시 미리보기)
 
 // 기존 import 유지
 import 'package:flutter/material.dart';
@@ -6,7 +12,6 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:get/get_core/src/get_main.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
-import './alarmScreen.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
@@ -76,11 +81,108 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  // =========================
+  // ✅ 진행률/상태 텍스트 & 색상
+  // =========================
+  String _areaStatusText(Map<String, dynamic> area) {
+    final int total = (area['total'] ?? 0);
+    final int done = (area['completed'] ?? 0);
+    if (total == 0) return '0 / 0건 미완료';
+    if (done == 0) return '0 / $total건 미완료';
+    if (done >= total) return '$done / $total건 완료';
+    return '$done / $total건 진행 중..';
+  }
+
+  String formatKoreanAddress(String? input) {
+    if (input == null) return '';
+    final parts = input.trim().split(RegExp(r'\s+'));
+    if (parts.isEmpty) return '';
+
+    final first = parts[0];
+
+    // 1) 특별시/광역시/특별자치시: "서울특별시 성북구" / "부산광역시 해운대구" 형태 → 앞 2토큰
+    if (first.endsWith('특별시') ||
+        first.endsWith('광역시') ||
+        first.endsWith('특별자치시')) {
+      if (parts.length >= 2) return '${parts[0]} ${parts[1]}';
+      return parts[0];
+    }
+
+    // 2) 도/특별자치도: "경기도 성남시 분당구" / "제주특별자치도 제주시" 형태 → 보통 앞 3토큰(도 + 시/군 + 구/읍/면)
+    if (first.endsWith('도') || first.endsWith('특별자치도')) {
+      if (parts.length >= 3) return '${parts[0]} ${parts[1]} ${parts[2]}';
+      if (parts.length >= 2) return '${parts[0]} ${parts[1]}';
+      return parts[0];
+    }
+
+    // 3) 기타 포맷 대비: 일단 앞 2토큰
+    return parts.take(2).join(' ');
+  }
+
+  Color _areaStatusColor(Map<String, dynamic> area) {
+    final int total = (area['total'] ?? 0);
+    final int done = (area['completed'] ?? 0);
+    if (total > 0 && done >= total) return const Color(0xFF61D5AB); // 완료 → 초록
+    if (done == 0) return Colors.grey; // 미완료 → 회색
+    return const Color(0xFF747474); // 진행중 → 진한 회색
+  }
+
+  // ✅ 추가: "진행 중.." 여부 (0 < done < total)
+  bool _isAreaInProgress(Map<String, dynamic> area) {
+    final int total = (area['total'] ?? 0);
+    final int done = (area['completed'] ?? 0);
+    return total > 0 && done > 0 && done < total;
+  }
+
+  // ✅ 추가: "완료" 여부 (done >= total)
+  bool _isAreaCompleted(Map<String, dynamic> area) {
+    final int total = (area['total'] ?? 0);
+    final int done = (area['completed'] ?? 0);
+    return total > 0 && done >= total;
+  }
+  // =========================
+
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
         Scaffold(
+          // TODO(임시 미리보기): 물량 조정 팝업 테스트용 AppBar — 필요 없으면 아래 appBar 전체를 삭제하세요.
+          appBar: AppBar(
+            title: const Text('물량 조정 팝업 미리보기'),
+            actions: [
+              IconButton(
+                tooltip: '팝업 띄우기(임시)',
+                icon: const Icon(Icons.notification_important_outlined),
+                onPressed: () async {
+                  // 예시 값 — 실제로는 DB 변경 감지 후 before/after로 바꿔 넣으세요
+                  const int before = 300;
+                  const int after = 230;
+
+                  // 팝업 띄우기
+                  await AdjustedVolumeDialog.show(
+                    context,
+                    title: '건강 상태를 고려해 오늘 배송물량이',
+                    titleLine2: '조정 되었습니다.',
+                    description: '무리 없이 일하실 수 있도록',
+                    before: before, // ✅ 숫자 전달
+                    after: after, // ✅ 숫자 전달
+                    iconColor: const Color(0xFF61D5AB),
+                    width: 340,
+                  );
+
+                  // TODO(임시 미리보기): 알림 페이지 갱신 예시 — 필요 없으면 아래 3줄 삭제
+                  final alarm = Get.find<AlarmController>();
+                  alarm.addAlarm(
+                    AlarmItem(
+                      title: '배송물량이 조정되었습니다.',
+                      subtitle: '$before → $after건',
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 38),
@@ -125,7 +227,7 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                   SizedBox(width: 5),
                                   Text(
-                                    '${UserData.residence ?? '지역 정보 없음'}', // ← 여기에 적용
+                                    '${UserData.residence ?? '지역 정보 없음'}',
                                     style: TextStyle(
                                       color: Colors.grey,
                                       fontSize: 13,
@@ -141,7 +243,7 @@ class _HomePageState extends State<HomePage> {
                         onTap:
                             () => Navigator.push(
                               context,
-                              MaterialPageRoute(builder: (_) => AlarmScreen()),
+                              MaterialPageRoute(builder: (_) => AlarmPage()),
                             ),
                         child: Padding(
                           padding: const EdgeInsets.only(top: 6.0),
@@ -157,7 +259,7 @@ class _HomePageState extends State<HomePage> {
 
                   SizedBox(height: 35),
 
-                  // 출근/퇴근 박스
+                  // 출근/퇴근 박스 -------------------------------------------------
                   Center(
                     child: GestureDetector(
                       onTap: () async {
@@ -311,14 +413,14 @@ class _HomePageState extends State<HomePage> {
 
                   SizedBox(height: 50),
 
-                  // 오늘의 배송
+                  // 오늘의 배송 ----------------------------------------------------
                   Text(
                     '오늘의 배송',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   SizedBox(height: 8),
 
-                  // 배송 상태
+                  // 배송 상태(전체)
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -389,12 +491,17 @@ class _HomePageState extends State<HomePage> {
 
                   SizedBox(height: 16),
 
-                  // 배송 목록
+                  // 배송 목록 (지역별 진행 상태 표시) -------------------------------
                   Expanded(
                     child: ListView.builder(
                       itemCount: deliveryAreas.length,
                       itemBuilder: (context, index) {
                         final area = deliveryAreas[index];
+
+                        // ✅ 진행/완료 상태 판별
+                        final bool inProgress = _isAreaInProgress(area);
+                        final bool completed = _isAreaCompleted(area);
+
                         return Padding(
                           padding: const EdgeInsets.only(
                             bottom: 5.0,
@@ -408,7 +515,11 @@ class _HomePageState extends State<HomePage> {
                               width: 48,
                               height: 48,
                               decoration: BoxDecoration(
-                                color: Color(0xFFF4F4F4),
+                                // 배경: 진행중만 초록, 나머지는 회색
+                                color:
+                                    inProgress
+                                        ? const Color(0xFF61D5AB)
+                                        : const Color(0xFFF4F4F4),
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Center(
@@ -416,31 +527,45 @@ class _HomePageState extends State<HomePage> {
                                   'assets/images/home/marker.svg',
                                   width: 24,
                                   height: 24,
-                                  color: Color(0xFF171412),
+                                  // 아이콘: 진행중=흰색, 완료=초록, 미완료=검정
+                                  color:
+                                      inProgress
+                                          ? Colors.white
+                                          : (completed
+                                              ? const Color(0xFF61D5AB)
+                                              : const Color(0xFF171412)),
                                 ),
                               ),
                             ),
                             title: Text(
-                              '${area['name']}',
-                              style: TextStyle(
-                                fontSize: 16,
+                              formatKoreanAddress(area['name']?.toString()),
+                              style: const TextStyle(
+                                fontSize: 15,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
+
+                            // 진행 상태 문구
                             subtitle: Text(
-                              '${area['completed']} / ${area['total']}건 완료',
+                              _areaStatusText(area),
                               style: TextStyle(
                                 fontSize: 14,
-                                color: Colors.grey,
+                                color: _areaStatusColor(area),
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
                             trailing: Padding(
                               padding: const EdgeInsets.only(left: 8),
                               child: Icon(Icons.chevron_right, size: 28),
                             ),
-                            onTap: () {
-                              Get.find<BottomNavController>()
-                                  .goToDeliveryDetail(area);
+                            onTap: () async {
+                              // 상세에서 변경이 있으면 돌아올 때 요약 재조회
+                              final changed =
+                                  await Get.find<BottomNavController>()
+                                      .goToDeliveryDetail(area);
+                              if (changed == true) {
+                                await fetchDeliverySummary();
+                              }
                             },
                           ),
                         );
