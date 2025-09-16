@@ -641,17 +641,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
 
                           // ✅ 상태 갱신
                           setState(() {});
-
-                          // ✅ 이 유닛(동/호)의 모든 건이 2(완료)인지 확인해서,
-                          //    그때만 드롭다운 닫기(다시 열 수 있음)
-                          // final unitAllDoneNow = myIndices.every(
-                          //   (idx) => _safeStatus(areaIndex, idx) == 2,
-                          // );
-                          // if (unitAllDoneNow) {
-                          //   setState(() {
-                          //     expandedIndex = null;
-                          //   });
-                          // }
                         },
                       ),
                 );
@@ -675,14 +664,17 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
               onPressed: () async {
                 final active = _findActiveDeliveryInfo();
                 if (active != null) {
-                  final activeAddr = active['address']!;
+                  final activeAddr = active['address'] ?? '';
                   alarmController.addAlarm(
                     AlarmItem(title: '배송완료를 눌렀는지 확인해주세요', subtitle: activeAddr),
                   );
                   await showDialog(
                     context: context,
                     builder:
-                        (dialogContext) => _activeWarnDialog(dialogContext),
+                        (dialogContext) => _activeWarnDialog(
+                          dialogContext,
+                          activeAddress: activeAddr, // 주소 전달
+                        ),
                   );
                   return;
                 }
@@ -820,9 +812,19 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   }
 
   // 진행 중 경고 다이얼로그 (builder의 context 사용!)
-  Widget _activeWarnDialog(BuildContext dialogContext) {
+  Widget _activeWarnDialog(
+    BuildContext dialogContext, {
+    required String activeAddress,
+  }) {
     const double dialogWidth = 360;
-    const double contentHeight = 120;
+    const double contentHeight = 145;
+    final hasAddr = activeAddress.trim().isNotEmpty;
+
+    // 👉 주소를 두 줄로 쪼개기
+    final split = _splitAddressForTwoLines(activeAddress);
+    final line1 = split['line1'] ?? activeAddress;
+    final line2 = split['line2'] ?? '';
+
     return Center(
       child: SizedBox(
         width: dialogWidth,
@@ -830,7 +832,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(10),
           ),
-          clipBehavior: Clip.antiAlias,
           backgroundColor: Colors.white,
           elevation: 6,
           insetPadding: const EdgeInsets.symmetric(
@@ -850,18 +851,13 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                     'assets/images/icons/warning.svg',
                     width: 35,
                     height: 34,
-                    theme: const SvgTheme(
-                      currentColor: Color(0xFFEE404C), // 삼각형만 이 색으로
-                    ),
+                    theme: const SvgTheme(currentColor: Color(0xFFEE404C)),
                   ),
                 ),
                 Positioned(
                   right: 0,
                   top: -15,
                   child: IconButton(
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
                     icon: const Icon(
                       Icons.close,
                       size: 22,
@@ -873,14 +869,57 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
               ],
             ),
           ),
-          content: const SizedBox(
+          content: SizedBox(
             height: contentHeight,
-            child: SingleChildScrollView(
-              child: Text(
-                '다른 주소에서 이미 배송을 시작했습니다.\n이전 건에서 "배송 도착"을 먼저 눌러 주세요.\n',
-                style: TextStyle(fontSize: 13, height: 1.5),
-                textAlign: TextAlign.left,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: '다른 주소에서 이미 배송을 시작했습니다',
+                        style: TextStyle(
+                          fontSize: 13,
+                          height: 1.5,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      TextSpan(
+                        text: '\n이전 건에서 "배송 도착"을 먼저 눌러 주세요.\n',
+                        style: TextStyle(fontSize: 13, height: 1.5),
+                      ),
+                    ],
+                  ),
+                  textAlign: TextAlign.left,
+                ),
+                if (hasAddr) ...[
+                  const SizedBox(height: 8),
+                  const Text(
+                    '[ 진행 중 배송지 ]',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Color.fromARGB(255, 63, 63, 63),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    line1, // 첫 줄
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF777777),
+                    ),
+                  ),
+                  if (line2.isNotEmpty)
+                    Text(
+                      line2, // 두 번째 줄
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF777777),
+                      ),
+                    ),
+                ],
+              ],
             ),
           ),
         ),
