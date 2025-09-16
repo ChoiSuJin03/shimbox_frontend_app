@@ -108,29 +108,47 @@ class _PhotoCaptureModalState extends State<PhotoCaptureModal> {
           right: 36,
           child: GestureDetector(
             onTap: () async => await _pickImage(),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '다시찍기',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
+            child: MediaQuery(
+              // ✅ 시스템 글꼴 확대 무시(원하면 삭제)
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(1.0)),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 7,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.15),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  SvgPicture.asset(
-                    'assets/images/delivery/re.svg',
-                    width: 20,
-                    height: 20,
-                    color: Colors.white,
-                  ),
-                ],
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      '다시찍기',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 14, // 고정 폰트 크기
+                        fontWeight: FontWeight.w700,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    SvgPicture.asset(
+                      'assets/images/delivery/re.svg',
+                      width: 18, // 아이콘도 살짝 축
+                      height: 18,
+                      color: Colors.white,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
