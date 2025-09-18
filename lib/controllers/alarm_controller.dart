@@ -6,7 +6,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/alarm_item.dart';
+import '../models/alarm/alarm_item.dart';
 
 class AlarmController extends GetxController {
   static const _prefsKey = 'alarms_v1';

@@ -7,8 +7,10 @@ import 'package:geolocator/geolocator.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 
 import 'package:shimbox_app/controllers/location_controller.dart';
+import 'package:shimbox_app/utils/api_service.dart';
+import 'package:shimbox_app/models/map/map_poi.dart';
 
-import './map_action_header.dart';
+import 'map_action_header.dart';
 
 class MapPage extends StatefulWidget {
   const MapPage({Key? key}) : super(key: key);
@@ -25,16 +27,16 @@ class _MapPageState extends State<MapPage> {
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<CompassEvent>? _compassSubscription;
 
-  final List<LatLng> waypoints = [
-    LatLng(37.5083, 126.8665), // 경유지 1
-    LatLng(37.5102, 126.8702), // 경유지 2
-    LatLng(37.5130, 126.8732), // 경유지 3
-    LatLng(37.5180, 126.8825), // 도착지 (맨 마지막)
-  ];
+  // 서버에서 받아오는 후보 목록
+  List<MapPOI> nearestCandidates = []; // address/complex 섞임(Top-9)
+  List<MapPOI> buildingsDrilldown = []; // complex 클릭 후 동 목록
+  bool inBuildingMode = false;
 
   Set<Marker> markers = {};
   Set<Polyline> polylines = {};
-  final String kakaoApiKey = '4faee1ecf5810b0685963cbb90ed9d48';
+
+  // ✅ 카카오 API 키 입력
+  final String kakaoApiKey = 'KAKAO_REST_API_KEY';
 
   bool _isUserInteracting = false;
   Timer? _interactionTimer;
@@ -61,13 +63,15 @@ class _MapPageState extends State<MapPage> {
       final loc = await _fetchCurrentLocation();
       if (!mounted) return;
       currentLocation = loc;
-      _setMarkers(loc);
-      // ✅ 초기 좌표를 LocationController에 반영 (주소 역지오코딩)
+
       await LocationController.to.setLatLng(loc);
+
+      await _loadNearestFromServer(loc);
+      _renderMarkers();
 
       mapController?.animateCamera(CameraUpdate.newLatLngZoom(loc, 17));
     } catch (e) {
-      print('❌ 초기화 실패: $e');
+      debugPrint('❌ 초기화 실패: $e');
     }
   }
 
@@ -81,14 +85,13 @@ class _MapPageState extends State<MapPage> {
         throw Exception('위치 권한 거부됨');
       }
     }
-
     final position = await Geolocator.getCurrentPosition(
       desiredAccuracy: LocationAccuracy.best,
     );
     return LatLng(position.latitude, position.longitude);
   }
 
-  void _startTracking() {
+  Future<void> _startTracking() async {
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
@@ -97,13 +100,11 @@ class _MapPageState extends State<MapPage> {
     ).listen((position) async {
       final loc = LatLng(position.latitude, position.longitude);
       if (!mounted) return;
-      setState(() {
-        currentLocation = loc;
-        _setMarkers(loc);
-      });
+      currentLocation = loc;
 
-      // ✅ 좌표 변경 시마다 LocationController 업데이트 → 홈 주소 실시간 반영
       await LocationController.to.setLatLng(loc);
+      await _loadNearestFromServer(loc);
+      _renderMarkers();
 
       if (!_isUserInteracting) {
         mapController?.animateCamera(CameraUpdate.newLatLng(loc));
@@ -138,37 +139,110 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
-  void _setMarkers(LatLng start) {
-    setState(() {
-      markers.clear();
-      markers.add(
+  // ---------- 서버 호출 ----------
+  Future<void> _loadNearestFromServer(LatLng loc) async {
+    try {
+      final pois = await ApiService.fetchNearestPOIs(
+        lat: loc.latitude,
+        lng: loc.longitude,
+        limit: 9,
+      );
+      debugPrint('🛰 nearest fetched: ${pois.length}개');
+      setState(() {
+        nearestCandidates = pois;
+        inBuildingMode = false;
+        buildingsDrilldown = [];
+      });
+    } catch (e) {
+      debugPrint('❌ nearest fetch error: $e');
+      // ApiService가 폴백을 반환하므로 여기선 추가 처리 불필요
+      final fb = await ApiService.fetchNearestPOIs(
+        lat: loc.latitude,
+        lng: loc.longitude,
+        limit: 9,
+      );
+      setState(() {
+        nearestCandidates = fb;
+        inBuildingMode = false;
+        buildingsDrilldown = [];
+      });
+    }
+  }
+
+  // ---------- 마커 렌더 ----------
+  void _renderMarkers() {
+    final Set<Marker> next = {};
+
+    if (currentLocation != null) {
+      next.add(
         Marker(
-          markerId: const MarkerId('start'),
-          position: start,
+          markerId: const MarkerId('me'),
+          position: currentLocation!,
           infoWindow: const InfoWindow(title: '현재 위치'),
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
         ),
       );
+    }
 
-      for (int i = 0; i < waypoints.length; i++) {
-        markers.add(
-          Marker(
-            markerId: MarkerId('waypoint$i'),
-            position: waypoints[i],
-            infoWindow: InfoWindow(
-              title: i == waypoints.length - 1 ? '도착지' : '경유지 ${i + 1}',
-            ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              i == waypoints.length - 1
-                  ? BitmapDescriptor.hueGreen
-                  : BitmapDescriptor.hueRed,
-            ),
+    final list = inBuildingMode ? buildingsDrilldown : nearestCandidates;
+    debugPrint(
+      '🧭 marker render: ${list.length}개, mode=${inBuildingMode ? 'building' : 'nearest'}',
+    );
+
+    for (final p in list) {
+      final hue = switch (p.type) {
+        POIType.address => BitmapDescriptor.hueRed,
+        POIType.complex => BitmapDescriptor.hueAzure,
+        POIType.building => BitmapDescriptor.hueOrange,
+      };
+
+      final snippet =
+          (p.type == POIType.complex && p.buildingCount != null)
+              ? '동 ${p.buildingCount}개'
+              : p.type.name;
+
+      next.add(
+        Marker(
+          markerId: MarkerId('poi_${p.id}'),
+          position: p.latLng,
+          icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+          infoWindow: InfoWindow(
+            title: p.label.isEmpty ? '(이름없음)' : p.label,
+            snippet: snippet,
           ),
-        );
-      }
-    });
+          onTap: () async {
+            if (p.type == POIType.complex) {
+              try {
+                final blds = await ApiService.fetchBuildingsOfComplex(p.id);
+                debugPrint('🏢 complex ${p.id} buildings: ${blds.length}');
+                setState(() {
+                  inBuildingMode = true;
+                  buildingsDrilldown = blds;
+                });
+                _renderMarkers();
+              } catch (e) {
+                debugPrint('❌ buildings fetch error: $e');
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('동 목록을 불러오지 못했습니다')),
+                  );
+                }
+              }
+            }
+          },
+        ),
+      );
+    }
+
+    setState(() => markers = next);
+
+    // 첫 아이템 보이게 카메라 스냅
+    if (list.isNotEmpty && mapController != null) {
+      mapController!.animateCamera(CameraUpdate.newLatLng(list.first.latLng));
+    }
   }
 
+  // ---------- 경로 최적화 ----------
   List<LatLng> _greedyRoute(LatLng start, List<LatLng> mids) {
     final List<LatLng> route = [];
     final List<bool> visited = List.filled(mids.length, false);
@@ -194,26 +268,81 @@ class _MapPageState extends State<MapPage> {
       route.add(mids[minIdx]);
       current = mids[minIdx];
     }
-
     return route;
   }
 
-  Future<void> _drawRouteFrom(LatLng start) async {
-    final end = waypoints.last;
-    final mids = waypoints.sublist(0, waypoints.length - 1);
+  List<LatLng> _twoOpt(List<LatLng> route) {
+    bool improved = true;
+    List<LatLng> best = List.from(route);
 
-    /// ✅ 가까운 순서로 경유지 재정렬 적용
-    final best = _greedyRoute(start, mids);
+    double dist(List<LatLng> r) {
+      double sum = 0;
+      for (int i = 0; i < r.length - 1; i++) {
+        sum += Geolocator.distanceBetween(
+          r[i].latitude,
+          r[i].longitude,
+          r[i + 1].latitude,
+          r[i + 1].longitude,
+        );
+      }
+      return sum;
+    }
 
+    double bestDist = dist(best);
+
+    while (improved) {
+      improved = false;
+      for (int i = 1; i < best.length - 2; i++) {
+        for (int k = i + 1; k < best.length - 1; k++) {
+          final newRoute = [
+            ...best.sublist(0, i),
+            ...best.sublist(i, k + 1).reversed,
+            ...best.sublist(k + 1),
+          ];
+          final d = dist(newRoute);
+          if (d + 1e-6 < bestDist) {
+            best = newRoute;
+            bestDist = d;
+            improved = true;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  Future<void> _drawOptimizedFrom(LatLng start) async {
+    // 현재 모드에서 사용할 최대 9개 포인트 수집
+    final base = inBuildingMode ? buildingsDrilldown : nearestCandidates;
+    if (base.isEmpty) return;
+
+    final points = base.take(9).map((e) => e.latLng).toList();
+
+    // Greedy + 2-opt
+    final greedy = _greedyRoute(start, points);
+    final improved = _twoOpt([start, ...greedy]);
+    final ordered = improved.sublist(1); // start 제외
+    final end = ordered.last;
+    final mids = ordered.sublist(0, ordered.length - 1);
+
+    await _drawRouteUsingKakao(start: start, end: end, mids: mids);
+  }
+
+  Future<void> _drawRouteUsingKakao({
+    required LatLng start,
+    required LatLng end,
+    required List<LatLng> mids,
+  }) async {
     final origin = '${start.longitude},${start.latitude}';
     final destination = '${end.longitude},${end.latitude}';
-    final waypointsStr = best
+    final waypointsStr = mids
         .map((e) => '${e.longitude},${e.latitude}')
         .join('|');
 
     final url =
-        'https://apis-navi.kakaomobility.com/v1/directions?origin=$origin&destination=$destination'
-        '${waypointsStr.isNotEmpty ? '&waypoints=$waypointsStr' : ''}';
+        'https://apis-navi.kakaomobility.com/v1/directions'
+        '?origin=$origin&destination=$destination'
+        '${mids.isNotEmpty ? '&waypoints=$waypointsStr' : ''}';
 
     try {
       final response = await http.get(
@@ -253,10 +382,15 @@ class _MapPageState extends State<MapPage> {
           };
         });
       } else {
-        print('❌ 경로 요청 실패: ${response.body}');
+        debugPrint('❌ 경로 요청 실패: ${response.body}');
+        if (context.mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('경로 요청 실패')));
+        }
       }
     } catch (e) {
-      print('❌ 경로 요청 중 예외 발생: $e');
+      debugPrint('❌ 경로 요청 예외: $e');
     }
   }
 
@@ -287,21 +421,17 @@ class _MapPageState extends State<MapPage> {
               _interactionTimer?.cancel();
             },
           ),
+
+          // 상단 헤더(현재위치 / 최적경로 / 뒤로)
           MapActionHeader(
             onCurrentLocationPressed: () async {
-              print('📍 위치 버튼 클릭됨');
               try {
                 final controller = await _controllerCompleter.future;
-
                 Position? last = await Geolocator.getLastKnownPosition();
-                LatLng loc;
-                if (last != null) {
-                  loc = LatLng(last.latitude, last.longitude);
-                } else {
-                  loc = await _fetchCurrentLocation();
-                }
-
-                if (!mounted) return;
+                LatLng loc =
+                    (last != null)
+                        ? LatLng(last.latitude, last.longitude)
+                        : await _fetchCurrentLocation();
 
                 final zoom = await controller.getZoomLevel();
                 controller.animateCamera(
@@ -315,11 +445,12 @@ class _MapPageState extends State<MapPage> {
                   ),
                 );
 
-                setState(() => currentLocation = loc);
-                // ✅ 수동 위치 이동 시에도 공유 컨트롤러 갱신
+                currentLocation = loc;
                 await LocationController.to.setLatLng(loc);
+                await _loadNearestFromServer(loc);
+                _renderMarkers();
               } catch (e) {
-                print('❌ 위치 이동 실패: $e');
+                debugPrint('❌ 위치 이동 실패: $e');
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('위치를 가져올 수 없습니다. 권한을 확인하세요.')),
@@ -329,9 +460,19 @@ class _MapPageState extends State<MapPage> {
             },
             onDrawRoutePressed: () {
               if (currentLocation != null) {
-                _drawRouteFrom(currentLocation!);
+                _drawOptimizedFrom(currentLocation!);
               }
             },
+            onBackPressed:
+                inBuildingMode
+                    ? () {
+                      setState(() {
+                        inBuildingMode = false;
+                        buildingsDrilldown = [];
+                      });
+                      _renderMarkers();
+                    }
+                    : null,
           ),
         ],
       ),

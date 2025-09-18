@@ -5,7 +5,7 @@ import 'survey_module.dart';
 
 import 'package:shimbox_app/models/adjusted_volume_dialog.dart'; // TODO(임시 미리보기): 나중에 삭제 가능
 import 'package:shimbox_app/controllers/alarm_controller.dart'; // TODO(임시 미리보기)
-import 'package:shimbox_app/models/alarm_item.dart'; // TODO(임시 미리보기)
+import 'package:shimbox_app/models/alarm/alarm_item.dart'; // TODO(임시 미리보기)
 
 // 기존 import 유지
 import 'package:flutter/material.dart';

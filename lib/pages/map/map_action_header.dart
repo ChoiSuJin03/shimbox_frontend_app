@@ -4,11 +4,13 @@ import 'package:flutter_svg/flutter_svg.dart';
 class MapActionHeader extends StatelessWidget {
   final VoidCallback onCurrentLocationPressed;
   final VoidCallback onDrawRoutePressed;
+  final VoidCallback? onBackPressed;
 
   const MapActionHeader({
     super.key,
     required this.onCurrentLocationPressed,
     required this.onDrawRoutePressed,
+    this.onBackPressed,
   });
 
   @override

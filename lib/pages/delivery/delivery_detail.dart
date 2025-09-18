@@ -11,7 +11,7 @@ import '../../utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 
 import 'package:shimbox_app/controllers/alarm_controller.dart';
-import 'package:shimbox_app/models/alarm_item.dart';
+import 'package:shimbox_app/models/alarm/alarm_item.dart';
 
 // 리포/유틸/위젯
 import 'package:shimbox_app/services/delivery_repository.dart';

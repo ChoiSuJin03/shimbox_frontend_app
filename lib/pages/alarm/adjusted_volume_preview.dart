@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:shimbox_app/models/adjusted_volume_dialog.dart';
 import 'package:shimbox_app/controllers/alarm_controller.dart';
-import 'package:shimbox_app/models/alarm_item.dart';
+import 'package:shimbox_app/models/alarm/alarm_item.dart';
 
 class AdjustedVolumePreviewPage extends StatelessWidget {
   const AdjustedVolumePreviewPage({super.key});

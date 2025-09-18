@@ -6,6 +6,7 @@ import '../models/signup_data.dart';
 import '../models/login_data.dart';
 import '../models/login_response.dart';
 import '../models/test_user_data.dart' as localUser;
+import 'package:shimbox_app/models/map/map_poi.dart';
 
 class ApiService {
   static const String baseUrl = 'http://116.39.208.72:26443';
@@ -293,5 +294,32 @@ class ApiService {
       print('🔥 PATCH 요청 실패 [$endpoint]: $e');
       rethrow;
     }
+  }
+
+  // 현재 위치 기준 k-NN Top-9 (폴백 없이, 서버 데이터만)
+  static Future<List<MapPOI>> fetchNearestPOIs({
+    required double lat,
+    required double lng,
+    int limit = 9,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/map/nearest?lat=$lat&lng=$lng&limit=$limit',
+    );
+
+    final res = await http.get(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${localUser.UserData.token}', // 필요 없으면 제거
+      },
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('nearest fetch fail: ${res.statusCode} ${res.body}');
+    }
+
+    final List data = json.decode(res.body);
+    // 서버가 빈 배열을 주면 그대로 빈 배열 반환(= 마커 없음)
+    return data.map((e) => MapPOI.fromJson(e)).toList();
   }
 }
