@@ -5,6 +5,9 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_compass/flutter_compass.dart';
+
+import 'package:shimbox_app/controllers/location_controller.dart';
+
 import './map_action_header.dart';
 
 class MapPage extends StatefulWidget {
@@ -26,7 +29,6 @@ class _MapPageState extends State<MapPage> {
     LatLng(37.5083, 126.8665), // 경유지 1
     LatLng(37.5102, 126.8702), // 경유지 2
     LatLng(37.5130, 126.8732), // 경유지 3
-
     LatLng(37.5180, 126.8825), // 도착지 (맨 마지막)
   ];
 
@@ -60,6 +62,9 @@ class _MapPageState extends State<MapPage> {
       if (!mounted) return;
       currentLocation = loc;
       _setMarkers(loc);
+      // ✅ 초기 좌표를 LocationController에 반영 (주소 역지오코딩)
+      await LocationController.to.setLatLng(loc);
+
       mapController?.animateCamera(CameraUpdate.newLatLngZoom(loc, 17));
     } catch (e) {
       print('❌ 초기화 실패: $e');
@@ -89,13 +94,17 @@ class _MapPageState extends State<MapPage> {
         accuracy: LocationAccuracy.high,
         distanceFilter: 10,
       ),
-    ).listen((position) {
+    ).listen((position) async {
       final loc = LatLng(position.latitude, position.longitude);
       if (!mounted) return;
       setState(() {
         currentLocation = loc;
         _setMarkers(loc);
       });
+
+      // ✅ 좌표 변경 시마다 LocationController 업데이트 → 홈 주소 실시간 반영
+      await LocationController.to.setLatLng(loc);
+
       if (!_isUserInteracting) {
         mapController?.animateCamera(CameraUpdate.newLatLng(loc));
       }
@@ -307,6 +316,8 @@ class _MapPageState extends State<MapPage> {
                 );
 
                 setState(() => currentLocation = loc);
+                // ✅ 수동 위치 이동 시에도 공유 컨트롤러 갱신
+                await LocationController.to.setLatLng(loc);
               } catch (e) {
                 print('❌ 위치 이동 실패: $e');
                 if (context.mounted) {
