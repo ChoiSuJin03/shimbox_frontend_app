@@ -13,6 +13,12 @@ import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 import 'package:shimbox_app/controllers/alarm_controller.dart';
 import 'package:shimbox_app/models/alarm_item.dart';
 
+// 리포/유틸/위젯
+import 'package:shimbox_app/services/delivery_repository.dart';
+import 'package:shimbox_app/utils/status_utils.dart';
+import 'package:shimbox_app/utils/address_utils.dart';
+import 'widgets/active_warn_dialog.dart';
+
 class DeliveryDetailPage extends StatefulWidget {
   final Map<String, dynamic> area;
   const DeliveryDetailPage({super.key, required this.area});
@@ -35,6 +41,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   bool isLoading = true;
 
   final AlarmController alarmController = Get.find<AlarmController>();
+  final _repo = DeliveryRepository();
 
   @override
   void initState() {
@@ -47,28 +54,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     });
   }
 
-  // ---------- utils ----------
-
-  /// "206동 1009호" → {'building':'206동','unit':'1009호'}
-  Map<String, String> _splitDetail(String? detail) {
-    final raw = (detail ?? '').trim();
-    if (raw.isEmpty) return {'building': '', 'unit': ''};
-    final parts = raw.split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
-    final building = parts.isNotEmpty ? parts[0] : '';
-    final unit = parts.length > 1 ? parts[1] : '';
-    return {'building': building, 'unit': unit};
-  }
-
-  int _statusToInt(String status) {
-    switch (status) {
-      case '배송시작':
-        return 1;
-      case '배송완료':
-        return 2;
-      default:
-        return 0;
-    }
-  }
+  // ---------- helpers (현지 상태 배열 접근) ----------
 
   /// status 안전 읽기
   int _safeStatus(int aIdx, int pos) {
@@ -85,26 +71,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     if (pos < 0 || pos >= list.length) return;
     list[pos] = v;
   }
-
-  /// 여러 건 상태 집계: 모두 완료=2, 하나라도 진행=1, 전부 대기=0
-  int _aggregateStatus(List<int> statuses) {
-    if (statuses.isEmpty) return 0;
-    if (statuses.every((s) => s == 2)) return 2;
-    if (statuses.any((s) => s == 1)) return 1;
-    return 0;
-  }
-
-  /// 진행 중(=1) 개수
-  int _countInProgress(List<int> statuses) =>
-      statuses.where((s) => s == 1).length;
-
-  /// 모두 완료 여부
-  bool _allDone(List<int> statuses) =>
-      statuses.isNotEmpty && statuses.every((s) => s == 2);
-
-  /// 아직 시작 안 함(전부 0) 여부
-  bool _allWaiting(List<int> statuses) =>
-      statuses.isNotEmpty && statuses.every((s) => s == 0);
 
   /// 첫 유효 전화번호
   String? _firstPhone(List<Map<String, dynamic>> prods) {
@@ -136,108 +102,15 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     return null;
   }
 
-  /// 주소를 2줄로 쪼갬: “…구/군/시” 까지를 1줄, 나머지를 2줄
-  Map<String, String> _splitAddressForTwoLines(String base) {
-    final b = base.trim();
-    final patterns = [
-      RegExp(r'^(.+?구)\s*(.*)$'),
-      RegExp(r'^(.+?군)\s*(.*)$'),
-      RegExp(r'^(.+?시)\s*(.*)$'),
-    ];
-    for (final re in patterns) {
-      final m = re.firstMatch(b);
-      if (m != null) {
-        return {'line1': m.group(1) ?? b, 'line2': m.group(2) ?? ''};
-      }
-    }
-    return {'line1': b, 'line2': ''};
-  }
-
   // ---------- data ----------
 
   Future<void> fetchData() async {
     try {
-      final data = await ApiService.fetchDeliverySummary();
-
-      final List<Map<String, dynamic>> result = [];
-      final List<List<int>> statusAllAreas = [];
-
-      for (final area in data) {
-        final String base = (area['shippingLocation'] ?? '') as String;
-        final List groups = (area['groups'] as List?) ?? [];
-
-        // building → unit → products[]
-        final Map<String, Map<String, List<Map<String, dynamic>>>> grouped = {};
-
-        for (final g in groups) {
-          final String detail = (g['detailAddress'] ?? '') as String;
-          final List products = (g['products'] as List?) ?? [];
-          final sp = _splitDetail(detail);
-          final String building = sp['building'] ?? '';
-          final String unit =
-              (sp['unit']?.isNotEmpty == true) ? sp['unit']! : detail;
-          if (building.isEmpty) continue;
-
-          grouped.putIfAbsent(building, () => {});
-          grouped[building]!.putIfAbsent(unit, () => []);
-
-          for (final p in products) {
-            grouped[building]![unit]!.add(Map<String, dynamic>.from(p as Map));
-          }
-        }
-
-        // building 단위 아이템 구성
-        grouped.forEach((building, unitMap) {
-          final units =
-              unitMap.entries
-                  .map((e) => {'unit': e.key, 'products': e.value})
-                  .toList()
-                ..sort((a, b) {
-                  final au = a['unit'] as String;
-                  final bu = b['unit'] as String;
-                  final an = RegExp(r'\d+').firstMatch(au)?.group(0);
-                  final bn = RegExp(r'\d+').firstMatch(bu)?.group(0);
-                  if (an != null && bn != null) {
-                    return int.parse(an).compareTo(int.parse(bn));
-                  }
-                  return au.compareTo(bu);
-                });
-
-          final total = units.fold<int>(
-            0,
-            (sum, u) => sum + (((u['products'] as List?) ?? []).length),
-          );
-
-          // status 일렬화
-          final List<int> statuses = [];
-          for (final u in units) {
-            final plist =
-                ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
-            for (final prod in plist) {
-              final s = _statusToInt((prod['shippingStatus'] ?? '') as String);
-              statuses.add(s);
-            }
-          }
-
-          result.add({
-            'name': '$base $building',
-            'base': base,
-            'building': building,
-            'total': total,
-            'units': units,
-          });
-          statusAllAreas.add(statuses);
-        });
-      }
-
-      result.sort(
-        (a, b) => (a['name'] as String).compareTo(b['name'] as String),
-      );
-
+      final res = await _repo.fetchAreas();
       if (!mounted) return;
       setState(() {
-        deliveryAreas = result;
-        deliveryStatus = statusAllAreas;
+        deliveryAreas = res.deliveryAreas; // 기존 구조 그대로
+        deliveryStatus = res.deliveryStatus;
         isLoading = false;
       });
     } catch (_) {
@@ -314,21 +187,18 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                       Color markerBg;
                       Color markerIcon;
                       if (progressed == 0) {
-                        // 전부 대기
                         markerBg = const Color(0xFFF4F4F4);
                         markerIcon = const Color(0xFF61D5AB);
                       } else if (isAllDone) {
-                        // 전부 완료
                         markerBg = const Color(0xFFF4F4F4);
                         markerIcon = const Color(0xFF6D6D6D);
                       } else {
-                        // 일부 진행 중
                         markerBg = const Color(0xFF61D5AB);
                         markerIcon = Colors.white;
                       }
 
-                      // 타이틀 줄바꿈
-                      final splitForHeader = _splitAddressForTwoLines(
+                      // 타이틀 줄바꿈 (유틸 사용)
+                      final splitForHeader = splitAddressForTwoLines(
                         item['name'] as String,
                       );
                       final headerL1 =
@@ -461,8 +331,8 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     final units = (item['units'] as List?) ?? [];
     int cursor = 0; // status 위치
 
-    // 주소를 ‘…구/군/시’에서 줄바꿈
-    final split = _splitAddressForTwoLines(base);
+    // 주소를 ‘…구/군/시’에서 줄바꿈 (유틸 사용)
+    final split = splitAddressForTwoLines(base);
     final baseLine1 = split['line1'] ?? base;
     final baseLine2 = split['line2'] ?? '';
 
@@ -480,10 +350,10 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         final myIndices = List.generate(count, (k) => start + k);
         cursor += count;
 
-        // 집계 상태
+        // 집계 상태 (유틸 사용)
         final statuses =
             myIndices.map((idx) => _safeStatus(areaIndex, idx)).toList();
-        final agg = _aggregateStatus(statuses); // 0/1/2
+        final agg = aggregateStatus(statuses); // 0/1/2
 
         // 주소(두 줄)
         final fullAddrLine1 = baseLine1;
@@ -502,7 +372,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         final Color actionIconColor =
             unitAllDone ? const Color(0xFFAAAAAA) : const Color(0xFF61D5AB);
 
-        // 버튼 생성
+        // 버튼 생성 (기존 로직 그대로)
         Widget buildUnitButton() {
           if (agg == 2) {
             // 모두 완료 → 버튼/아이콘/글자 회색
@@ -639,7 +509,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                             );
                           }
 
-                          // ✅ 상태 갱신
+                          // 상태 갱신
                           setState(() {});
                         },
                       ),
@@ -673,7 +543,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                     builder:
                         (dialogContext) => _activeWarnDialog(
                           dialogContext,
-                          activeAddress: activeAddr, // 주소 전달
+                          activeAddress: activeAddr,
                         ),
                   );
                   return;
@@ -729,7 +599,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 헤더: 주소 두 줄 + '배송 건수' + 전화/네비
+            // 헤더: 주소 두 줄 + '배송 건수' + 전화/내비
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -820,8 +690,8 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     const double contentHeight = 145;
     final hasAddr = activeAddress.trim().isNotEmpty;
 
-    // 👉 주소를 두 줄로 쪼개기
-    final split = _splitAddressForTwoLines(activeAddress);
+    // 주소를 두 줄로 (유틸 사용)
+    final split = splitAddressForTwoLines(activeAddress);
     final line1 = split['line1'] ?? activeAddress;
     final line2 = split['line2'] ?? '';
 
@@ -904,7 +774,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                     ),
                   ),
                   Text(
-                    line1, // 첫 줄
+                    line1,
                     style: const TextStyle(
                       fontSize: 12,
                       color: Color(0xFF777777),
@@ -912,7 +782,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                   ),
                   if (line2.isNotEmpty)
                     Text(
-                      line2, // 두 번째 줄
+                      line2,
                       style: const TextStyle(
                         fontSize: 12,
                         color: Color(0xFF777777),
