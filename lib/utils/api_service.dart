@@ -1,5 +1,7 @@
+// lib/utils/api_service.dart
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/signup_data.dart';
@@ -151,7 +153,7 @@ class ApiService {
     }
   }
 
-  /// ✅ 수정된 통합 버전: 설문 + 건강 데이터 동시 전송
+  /// ✅ 설문 + 건강 데이터 동시 전송
   static Future<bool> submitHealthSurvey({
     required String finish1,
     required String finish2,
@@ -296,30 +298,267 @@ class ApiService {
     }
   }
 
-  // 현재 위치 기준 k-NN Top-9 (폴백 없이, 서버 데이터만)
-  static Future<List<MapPOI>> fetchNearestPOIs({
-    required double lat,
-    required double lng,
-    int limit = 9,
-  }) async {
-    final uri = Uri.parse(
-      '$baseUrl/map/nearest?lat=$lat&lng=$lng&limit=$limit',
-    );
+  // ------------------------------------------------------------------
+  // 지도 API
+  // ------------------------------------------------------------------
 
-    final res = await http.get(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ${localUser.UserData.token}', // 필요 없으면 제거
-      },
-    );
+  // ApiService 클래스 내부 어디 위쪽에 추가 (예: 지도 API 섹션 위)
+  static Future<int> _resolveDriverId({int? override}) async {
+    if (override != null && override > 0) return override;
 
-    if (res.statusCode != 200) {
-      throw Exception('nearest fetch fail: ${res.statusCode} ${res.body}');
+    final prefs = await SharedPreferences.getInstance();
+    // 흔한 키 이름들을 순서대로 조회
+    final candidates = ['driverId', 'userId', 'id'];
+    for (final key in candidates) {
+      final v = prefs.get(key);
+      if (v is int && v > 0) return v;
+      if (v is String) {
+        final parsed = int.tryParse(v) ?? 0;
+        if (parsed > 0) return parsed;
+      }
+    }
+    return 0; // 못 찾으면 0 (드라이버 미지정)
+  }
+
+  /// 지도용 상품 목록 가져오기
+  /// // ================== 주소만 가져오기 (상품 -> 주소 문자열 리스트) ==================
+
+  static Future<List<String>> fetchAddressStrings({int? driverId}) async {
+    final headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': 'Bearer ${localUser.UserData.token}', // 불필요하면 제거
+    };
+
+    // GET 후보들 (driverId가 필요할 수 있으니 쿼리/패스 모두 시도)
+    final List<Uri> getTries = [
+      if (driverId != null && driverId > 0)
+        Uri.parse('$baseUrl/api/v1/driver/$driverId/products'),
+      if (driverId != null && driverId > 0)
+        Uri.parse('$baseUrl/api/v1/product/list?driverId=$driverId'),
+      if (driverId != null && driverId > 0)
+        Uri.parse('$baseUrl/api/v1/driver/product/list?driverId=$driverId'),
+
+      // 드라이버 없이도 열려 있을 수 있는 목록
+      Uri.parse('$baseUrl/api/v1/driver/products'),
+      Uri.parse('$baseUrl/api/v1/driver/product/list'),
+      Uri.parse('$baseUrl/api/v1/product/list'),
+      Uri.parse('$baseUrl/api/v1/product'),
+      Uri.parse('$baseUrl/api/v1/product/all'),
+      Uri.parse('$baseUrl/api/v1/product/today'),
+    ];
+
+    // POST 후보 (검색형 – 드라이버/날짜 필터가 필요할 수 있음)
+    final List<(Uri uri, Map<String, dynamic> body, String label)> postTries = [
+      if (driverId != null && driverId > 0)
+        (
+          Uri.parse('$baseUrl/api/v1/product/search'),
+          {'driverId': driverId, 'date': 'today'},
+          'product/search with driverId',
+        ),
+      if (driverId != null && driverId > 0)
+        (
+          Uri.parse('$baseUrl/api/v1/driver/products/search'),
+          {'driverId': driverId, 'date': 'today'},
+          'driver/products/search with driverId',
+        ),
+      (
+        Uri.parse('$baseUrl/api/v1/product/search'),
+        {'date': 'today'},
+        'product/search',
+      ),
+    ];
+
+    List _unwrap(dynamic decoded) {
+      if (decoded is List) return decoded;
+      if (decoded is Map) {
+        final keys = ['data', 'content', 'items', 'list', 'results', 'rows'];
+        for (final k in keys) {
+          if (decoded[k] is List) return decoded[k] as List;
+        }
+      }
+      return const [];
     }
 
-    final List data = json.decode(res.body);
-    // 서버가 빈 배열을 주면 그대로 빈 배열 반환(= 마커 없음)
-    return data.map((e) => MapPOI.fromJson(e)).toList();
+    List<String> _extractAddresses(List list) {
+      final out = <String>[];
+      for (final item in list) {
+        if (item is! Map) continue;
+
+        final base =
+            (item['address'] ??
+                    item['baseAddress'] ??
+                    item['shippingAddress'] ??
+                    '')
+                .toString()
+                .trim();
+
+        final detail =
+            (item['detailAddress'] ??
+                    item['addressDetail'] ??
+                    item['detail_address'] ??
+                    '')
+                .toString()
+                .trim();
+
+        if (base.isEmpty) continue;
+
+        final full = detail.isNotEmpty ? '$base $detail' : base;
+        out.add(full);
+      }
+      return out;
+    }
+
+    // 1) GET 시도
+    for (final uri in getTries) {
+      try {
+        debugPrint('GET $uri');
+        final res = await http.get(uri, headers: headers);
+        debugPrint(' -> ${res.statusCode}');
+        if (res.statusCode == 200) {
+          final decoded = json.decode(utf8.decode(res.bodyBytes));
+          final list = _unwrap(decoded);
+          final addrs = _extractAddresses(list);
+          if (addrs.isNotEmpty) {
+            debugPrint(
+              '✅ addresses via GET: ${uri.path} (count=${addrs.length})',
+            );
+            return addrs;
+          }
+        }
+      } catch (e) {
+        debugPrint('GET error $uri -> $e');
+      }
+    }
+
+    // 2) POST 시도
+    for (final t in postTries) {
+      try {
+        debugPrint('POST ${t.$1} [${t.$3}] body=${t.$2}');
+        final res = await http.post(
+          t.$1,
+          headers: headers,
+          body: json.encode(t.$2),
+        );
+        debugPrint(' -> ${res.statusCode}');
+        if (res.statusCode == 200) {
+          final decoded = json.decode(utf8.decode(res.bodyBytes));
+          final list = _unwrap(decoded);
+          final addrs = _extractAddresses(list);
+          if (addrs.isNotEmpty) {
+            debugPrint(
+              '✅ addresses via POST: ${t.$1.path} (count=${addrs.length})',
+            );
+            return addrs;
+          }
+        }
+      } catch (e) {
+        debugPrint('POST error ${t.$1} -> $e');
+      }
+    }
+
+    // 모두 실패 시 에러 반환
+    throw Exception('주소 목록 API를 찾지 못했습니다.');
+  }
+
+  // ============== 폴백: summary에서 지역명만 (주소 대용) ==============
+  static Future<List<String>> fetchSummaryLocations() async {
+    try {
+      final data = await fetchDeliverySummary(); // 기존 함수 재사용
+      final out = <String>{}; // 중복 제거
+      for (final a in data) {
+        final s = (a['shippingLocation'] ?? '').toString().trim();
+        if (s.isNotEmpty) out.add(s);
+      }
+      return out.toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  // ApiService 클래스 안에 추가
+  static Future<List<Map<String, dynamic>>> fetchProductsForMap() async {
+    final headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': 'Bearer ${localUser.UserData.token}', // 필요없으면 제거
+    };
+
+    List<Map<String, dynamic>> _extractList(dynamic decoded) {
+      if (decoded is List) return decoded.cast<Map<String, dynamic>>();
+      if (decoded is Map) {
+        for (final k in [
+          'data',
+          'content',
+          'items',
+          'list',
+          'results',
+          'rows',
+        ]) {
+          final v = decoded[k];
+          if (v is List) return v.cast<Map<String, dynamic>>();
+        }
+      }
+      return const [];
+    }
+
+    // 주소 필드가 있는 아이템만 남기기
+    List<Map<String, dynamic>> _filterHasAddress(
+      List<Map<String, dynamic>> list,
+    ) {
+      return list.where((p) {
+        final a =
+            (p['address'] ?? p['baseAddress'] ?? p['shippingAddress'] ?? '')
+                .toString()
+                .trim();
+        return a.isNotEmpty;
+      }).toList();
+    }
+
+    // 후보 GET 엔드포인트 (필요한 것만 시도)
+    final getTries = <Uri>[
+      Uri.parse('$baseUrl/api/v1/driver/products'),
+      Uri.parse('$baseUrl/api/v1/driver/product/list'),
+      Uri.parse('$baseUrl/api/v1/product/list'),
+      Uri.parse('$baseUrl/api/v1/product/today'),
+      Uri.parse('$baseUrl/api/v1/order/list'),
+    ];
+
+    for (final uri in getTries) {
+      try {
+        debugPrint('GET $uri');
+        final res = await http.get(uri, headers: headers);
+        debugPrint(' -> ${res.statusCode}');
+        if (res.statusCode == 200) {
+          final decoded = json.decode(utf8.decode(res.bodyBytes));
+          final list = _filterHasAddress(_extractList(decoded));
+          if (list.isNotEmpty) return list;
+        }
+      } catch (_) {}
+    }
+
+    // 후보 POST(검색)
+    final postTries = <(Uri, Map<String, dynamic>)>[
+      (Uri.parse('$baseUrl/api/v1/product/search'), {'date': 'today'}),
+      (Uri.parse('$baseUrl/api/v1/driver/products/search'), {'date': 'today'}),
+    ];
+    for (final t in postTries) {
+      try {
+        debugPrint('POST ${t.$1} body=${t.$2}');
+        final res = await http.post(
+          t.$1,
+          headers: headers,
+          body: json.encode(t.$2),
+        );
+        debugPrint(' -> ${res.statusCode}');
+        if (res.statusCode == 200) {
+          final decoded = json.decode(utf8.decode(res.bodyBytes));
+          final list = _filterHasAddress(_extractList(decoded));
+          if (list.isNotEmpty) return list;
+        }
+      } catch (_) {}
+    }
+
+    throw Exception('상품 목록 API를 찾지 못했습니다.');
   }
 }
