@@ -6,6 +6,7 @@ import 'package:shimbox_app/pages/health/health_connect_service.dart';
 import 'package:shimbox_app/pages/wearable/wearable.dart';
 import 'package:shimbox_app/utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
+import 'package:shimbox_app/pages/health/health_alert_dialog.dart'; // TODO(임시 미리보기): 건강 경고 팝업 미리보기용 import (나중에 삭제 가능)
 
 class HealthPage extends StatefulWidget {
   const HealthPage({super.key});
@@ -276,6 +277,7 @@ class _HealthPageState extends State<HealthPage> {
                         ),
                       ],
                     ),
+                    // 기존 웨어러블 연동 버튼 (그대로)
                     TextButton(
                       onPressed: _tryConnectHealthService,
                       style: TextButton.styleFrom(
@@ -299,6 +301,24 @@ class _HealthPageState extends State<HealthPage> {
                           ),
                         ],
                       ),
+                    ),
+                    // TODO(임시 미리보기): 건강 경고 팝업 미리보기 버튼 추가 (나중에 삭제 가능)
+                    IconButton(
+                      tooltip: '건강 경고 미리보기',
+                      icon: SvgPicture.asset(
+                        'assets/images/icons/warning.svg',
+                        width: 22,
+                        height: 22,
+                      ),
+                      onPressed: () async {
+                        await HealthAlertDialog.show(
+                          context,
+                          title: '현재 심박수가 평소보다 높습니다.',
+                          subtitle: '무리하지 마시고 휴식을 권장합니다.',
+                          warningIconPath: 'assets/images/icons/warning.svg',
+                          width: 340,
+                        );
+                      },
                     ),
                   ],
                 ),
