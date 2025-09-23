@@ -35,9 +35,6 @@ class HealthAlertDialog {
                     children: [
                       const SizedBox(height: 15),
 
-                      // 경고 아이콘
-                      // -> 삼각형은 currentColor 사용, 느낌표는 #FFFFFF 고정
-                      // -> SvgTheme.currentColor 로만 빨강 지정
                       SvgPicture.asset(
                         warningIconPath,
                         width: 60,
