@@ -6,7 +6,7 @@ import 'package:shimbox_app/pages/health/health_connect_service.dart';
 import 'package:shimbox_app/pages/wearable/wearable.dart';
 import 'package:shimbox_app/utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
-import 'package:shimbox_app/pages/health/health_alert_dialog.dart'; // TODO(임시 미리보기): 건강 경고 팝업 미리보기용 import (나중에 삭제 가능)
+import 'package:shimbox_app/pages/health/health_alert_dialog.dart'; // TODO(임시 미리보기): 건강 경고 팝업 미리보기용 import
 
 class HealthPage extends StatefulWidget {
   const HealthPage({super.key});
@@ -302,7 +302,7 @@ class _HealthPageState extends State<HealthPage> {
                         ],
                       ),
                     ),
-                    // TODO(임시 미리보기): 건강 경고 팝업 미리보기 버튼 추가 (나중에 삭제 가능)
+                    //  /////////////////////////////////// TODO(임시 미리보기): 건강 경고 팝업 미리보기 버튼 추가
                     IconButton(
                       tooltip: '건강 경고 미리보기',
                       icon: SvgPicture.asset(
@@ -320,6 +320,7 @@ class _HealthPageState extends State<HealthPage> {
                         );
                       },
                     ),
+                    ///////////////////////////////////////////////////////////////
                   ],
                 ),
                 const SizedBox(height: 15),
