@@ -55,20 +55,44 @@ class _HomePageState extends State<HomePage> {
       int total = 0;
       int completed = 0;
 
+      // "서울특별시 성북구" 처럼 구 단위로 정규화
+      String normalizeToGu(String? raw) {
+        if (raw == null) return '';
+        final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+        return formatKoreanAddress(s); // 이미 파일에 있는 함수: 시/도 + 구 까지만 남김
+      }
+
+      // 구 단위로 합산
+      final Map<String, Map<String, int>> buckets = {};
+      for (final area in data) {
+        final key = normalizeToGu(area['shippingLocation']?.toString());
+        final int t = (area['totalCount'] ?? 0).toInt();
+        final int c = (area['completedCount'] ?? 0).toInt();
+
+        final slot = buckets.putIfAbsent(
+          key,
+          () => {'total': 0, 'completed': 0},
+        );
+        slot['total'] = (slot['total'] ?? 0) + t;
+        slot['completed'] = (slot['completed'] ?? 0) + c;
+
+        total += t;
+        completed += c;
+      }
+
       final areas =
-          data.map<Map<String, dynamic>>((area) {
-            final int totalCount = (area['totalCount'] ?? 0).toInt();
-            final int completedCount = (area['completedCount'] ?? 0).toInt();
-
-            total += totalCount;
-            completed += completedCount;
-
-            return {
-              'name': area['shippingLocation'],
-              'total': totalCount,
-              'completed': completedCount,
-            };
-          }).toList();
+          buckets.entries
+              .map(
+                (e) => {
+                  'name': e.key, // ← 리스트 아이템에서 그대로 사용
+                  'total': e.value['total']!,
+                  'completed': e.value['completed']!,
+                },
+              )
+              .toList()
+            ..sort(
+              (a, b) => (a['name'] as String).compareTo(b['name'] as String),
+            );
 
       setState(() {
         deliveryAreas = areas;

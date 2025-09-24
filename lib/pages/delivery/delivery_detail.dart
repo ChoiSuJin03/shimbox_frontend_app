@@ -17,7 +17,6 @@ import 'package:shimbox_app/models/alarm/alarm_item.dart';
 import 'package:shimbox_app/services/delivery_repository.dart';
 import 'package:shimbox_app/utils/status_utils.dart';
 import 'package:shimbox_app/utils/address_utils.dart';
-import 'widgets/active_warn_dialog.dart';
 
 class DeliveryDetailPage extends StatefulWidget {
   final Map<String, dynamic> area;
@@ -28,20 +27,21 @@ class DeliveryDetailPage extends StatefulWidget {
 }
 
 class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
-  int? expandedIndex;
+  int? expandedIndex; // 도로명 섹션 펼침 인덱스
 
-  /// area별 product 순서대로 status (0:대기, 1:시작, 2:완료)
+  // area별 product 순서대로 status (0:대기, 1:시작, 2:완료)
   List<List<int>> deliveryStatus = [];
 
-  /// 화면 데이터:
-  /// [{ name:'기본주소 동', base:'기본주소', building:'동', total:n,
-  ///    units:[{unit:'1002호', products:[...]}, ...] }]
+  // [{ name:'기본주소 동', base:'기본주소', building:'동', total:n, units:[{unit, products:[]}, ...]}]
   List<Map<String, dynamic>> deliveryAreas = [];
 
   bool isLoading = true;
 
   final AlarmController alarmController = Get.find<AlarmController>();
   final _repo = DeliveryRepository();
+
+  /// 도로명별 선택된 동 (Dropdown) 상태: key=road, value=dong
+  final Map<String, String?> _selectedDongByRoad = {};
 
   @override
   void initState() {
@@ -54,9 +54,122 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     });
   }
 
-  // ---------- helpers (현지 상태 배열 접근) ----------
+  // ---------- 데이터 로드 ----------
+  Future<void> fetchData() async {
+    try {
+      final res = await _repo.fetchAreas();
+      if (!mounted) return;
+      setState(() {
+        deliveryAreas = res.deliveryAreas;
+        deliveryStatus = res.deliveryStatus;
+        isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => isLoading = false);
+    }
+  }
 
-  /// status 안전 읽기
+  // ---------- 주소 헬퍼 ----------
+  String extractRoadName(String? raw) {
+    if (raw == null) return '';
+    final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (s.isEmpty) return '';
+    final parts = s.split(' ');
+    if (parts.length < 3) return s;
+    final candidates = parts.sublist(2);
+    final suffix = ['로', '길', '대로', '번길'];
+    for (final token in candidates) {
+      if (suffix.any((suf) => token.endsWith(suf))) return token;
+    }
+    return candidates.isNotEmpty ? candidates.first : s;
+  }
+
+  String extractDong(dynamic item, [dynamic unitOrProd]) {
+    String? dong =
+        (item is Map
+                ? (item['building'] ?? item['dong'] ?? item['buildingDong'])
+                : null)
+            ?.toString();
+    if ((dong == null || dong.isEmpty) && unitOrProd is Map) {
+      dong = (unitOrProd['dong'] ?? unitOrProd['buildingDong'])?.toString();
+    }
+    return (dong == null || dong.isEmpty) ? '미지정동' : dong;
+  }
+
+  /// deliveryAreas -> "도로명 → 동"으로 그룹핑
+  /// [ { road, totals:{total,done,inProg}, dongs:[ { dong, indices:[areaIndex...], items:[item...] } ] } ]
+  List<Map<String, dynamic>> groupByRoadThenDong() {
+    final Map<String, Map<String, dynamic>> roadMap = {};
+
+    for (int i = 0; i < deliveryAreas.length; i++) {
+      final item = deliveryAreas[i];
+      final base = (item['base'] ?? item['name'] ?? '') as String;
+      final road = extractRoadName(base);
+
+      final roadSlot = roadMap.putIfAbsent(road, () {
+        return {
+          'road': road,
+          'totals': {'total': 0, 'done': 0, 'inProg': 0},
+          'dongs': <String, Map<String, dynamic>>{},
+        };
+      });
+
+      final List<int> areaStatuses =
+          (i < deliveryStatus.length) ? deliveryStatus[i] : const <int>[];
+      final int total = (item['total'] as int? ?? 0);
+      final int done = areaStatuses.where((s) => s == 2).length;
+      final int inProg = areaStatuses.where((s) => s == 1).length;
+
+      (roadSlot['totals'] as Map)['total'] =
+          ((roadSlot['totals'] as Map)['total'] as int) + total;
+      (roadSlot['totals'] as Map)['done'] =
+          ((roadSlot['totals'] as Map)['done'] as int) + done;
+      (roadSlot['totals'] as Map)['inProg'] =
+          ((roadSlot['totals'] as Map)['inProg'] as int) + inProg;
+
+      // 동 추출 (item 또는 units/products에서)
+      final units = (item['units'] as List?) ?? [];
+      String dongAtItem = extractDong(item);
+      if (dongAtItem == '미지정동' && units.isNotEmpty) {
+        final u0 = units.first as Map<String, dynamic>;
+        final prods =
+            ((u0['products'] as List?) ?? []).cast<Map<String, dynamic>>();
+        if (prods.isNotEmpty) dongAtItem = extractDong(item, prods.first);
+      }
+
+      final dongsMap = roadSlot['dongs'] as Map<String, Map<String, dynamic>>;
+      final dongSlot = dongsMap.putIfAbsent(dongAtItem, () {
+        return {
+          'dong': dongAtItem,
+          'indices': <int>[],
+          'items': <Map<String, dynamic>>[],
+        };
+      });
+      (dongSlot['indices'] as List<int>).add(i);
+      (dongSlot['items'] as List<Map<String, dynamic>>).add(item);
+    }
+
+    // 정렬
+    final roadList =
+        roadMap.values.map((r) {
+            final dongs =
+                (r['dongs'] as Map<String, Map<String, dynamic>>).values
+                    .toList()
+                  ..sort(
+                    (a, b) =>
+                        (a['dong'] as String).compareTo(b['dong'] as String),
+                  );
+            return {'road': r['road'], 'totals': r['totals'], 'dongs': dongs};
+          }).toList()
+          ..sort(
+            (a, b) => (a['road'] as String).compareTo(b['road'] as String),
+          );
+
+    return roadList;
+  }
+
+  // ---------- status 접근 ----------
   int _safeStatus(int aIdx, int pos) {
     if (aIdx < 0 || aIdx >= deliveryStatus.length) return 0;
     final list = deliveryStatus[aIdx];
@@ -64,7 +177,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     return list[pos];
   }
 
-  /// status 안전 쓰기
   void _setStatus(int aIdx, int pos, int v) {
     if (aIdx < 0 || aIdx >= deliveryStatus.length) return;
     final list = deliveryStatus[aIdx];
@@ -72,7 +184,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     list[pos] = v;
   }
 
-  /// 첫 유효 전화번호
   String? _firstPhone(List<Map<String, dynamic>> prods) {
     for (final p in prods) {
       final v = (p['recipientPhone'] ?? '').toString().trim();
@@ -81,7 +192,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     return null;
   }
 
-  /// 다른 주소에서 이미 시작된 건(1) 찾아서 안내용 정보 반환
   Map<String, String>? _findActiveDeliveryInfo() {
     for (int a = 0; a < deliveryAreas.length; a++) {
       int cursor = 0;
@@ -102,27 +212,11 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     return null;
   }
 
-  // ---------- data ----------
-
-  Future<void> fetchData() async {
-    try {
-      final res = await _repo.fetchAreas();
-      if (!mounted) return;
-      setState(() {
-        deliveryAreas = res.deliveryAreas; // 기존 구조 그대로
-        deliveryStatus = res.deliveryStatus;
-        isLoading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => isLoading = false);
-    }
-  }
-
   // ---------- UI ----------
-
   @override
   Widget build(BuildContext context) {
+    final roadGroups = groupByRoadThenDong();
+
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -161,157 +255,206 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                     vertical: 16,
                   ),
                   child: ListView.builder(
-                    itemCount: deliveryAreas.length,
-                    itemBuilder: (context, index) {
-                      final item = deliveryAreas[index];
-                      final isExpanded = expandedIndex == index;
-
-                      final List<int> areaStatuses =
-                          (index < deliveryStatus.length)
-                              ? deliveryStatus[index]
-                              : const <int>[];
-                      final int total = (item['total'] as int? ?? 0);
-
-                      // 진행 수/완료 수
-                      final int doneCount =
-                          areaStatuses.where((s) => s == 2).length;
-                      final int inProgressCount =
-                          areaStatuses.where((s) => s == 1).length;
-                      final int progressed = doneCount + inProgressCount;
+                    itemCount: roadGroups.length,
+                    itemBuilder: (context, ri) {
+                      final rg = roadGroups[ri];
+                      final roadName = (rg['road'] as String?) ?? '';
+                      final totals = (rg['totals'] as Map);
+                      final int total = (totals['total'] as int?) ?? 0;
+                      final int done = (totals['done'] as int?) ?? 0;
+                      final int inProg = (totals['inProg'] as int?) ?? 0;
+                      final int progressed = done + inProg;
                       final bool isAllDone =
-                          progressed == total &&
-                          total > 0 &&
-                          inProgressCount == 0;
+                          (progressed == total && total > 0 && inProg == 0);
 
-                      // 마커 색상 3단계
-                      Color markerBg;
-                      Color markerIcon;
-                      if (progressed == 0) {
-                        markerBg = const Color(0xFFF4F4F4);
-                        markerIcon = const Color(0xFF61D5AB);
-                      } else if (isAllDone) {
-                        markerBg = const Color(0xFFF4F4F4);
-                        markerIcon = const Color(0xFF6D6D6D);
-                      } else {
-                        markerBg = const Color(0xFF61D5AB);
-                        markerIcon = Colors.white;
-                      }
-
-                      // 타이틀 줄바꿈 (유틸 사용)
-                      final splitForHeader = splitAddressForTwoLines(
-                        item['name'] as String,
+                      final dongs =
+                          (rg['dongs'] as List).cast<Map<String, dynamic>>();
+                      final dongNames =
+                          dongs.map((d) => d['dong'] as String).toList();
+                      // 현재 도로의 선택된 동
+                      final selDong = _selectedDongByRoad.putIfAbsent(
+                        roadName,
+                        () => dongNames.isNotEmpty ? dongNames.first : null,
                       );
-                      final headerL1 =
-                          splitForHeader['line1'] ?? '${item['name']}';
-                      final headerL2 = splitForHeader['line2'] ?? '';
 
-                      // 상태 문구
-                      late String statusText;
-                      late Color statusColor;
-                      if (isAllDone) {
-                        statusText = '$total / $total건 완료';
-                        statusColor = const Color(0xFF888888);
-                      } else if (progressed > 0) {
-                        statusText = '$progressed / $total건 진행 중';
-                        statusColor = const Color(0xFF2D5FFF);
-                      } else {
-                        statusText = '0 / $total건 미완료';
-                        statusColor = const Color(0xFF888888);
+                      // 헤더(도로명)
+                      Widget roadHeader() => GestureDetector(
+                        onTap:
+                            () => setState(
+                              () =>
+                                  expandedIndex =
+                                      (expandedIndex == ri ? null : ri),
+                            ),
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color:
+                                      progressed == 0
+                                          ? const Color(0xFFF4F4F4)
+                                          : const Color(0xFF61D5AB),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Center(
+                                  child: SvgPicture.asset(
+                                    'assets/images/home/marker.svg',
+                                    width: 24,
+                                    height: 24,
+                                    color:
+                                        progressed == 0
+                                            ? const Color(0xFF61D5AB)
+                                            : Colors.white,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      roadName.isEmpty ? '기타' : roadName,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                        color:
+                                            isAllDone
+                                                ? const Color(0xFF555555)
+                                                : Colors.black87,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      isAllDone
+                                          ? '$total / $total건 완료'
+                                          : '$progressed / $total건 진행 중',
+                                      style: TextStyle(
+                                        color:
+                                            isAllDone
+                                                ? const Color(0xFF888888)
+                                                : const Color(0xFF2D5FFF),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Icon(
+                                expandedIndex == ri
+                                    ? Icons.keyboard_arrow_up_rounded
+                                    : Icons.keyboard_arrow_down_rounded,
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+
+                      final opened = expandedIndex == ri;
+
+                      // 선택된 동의 데이터 찾기
+                      Map<String, dynamic>? selectedDongBlock;
+                      if (selDong != null) {
+                        selectedDongBlock = dongs.firstWhere(
+                          (d) => d['dong'] == selDong,
+                          orElse:
+                              () =>
+                                  dongs.isNotEmpty
+                                      ? dongs.first
+                                      : <String, dynamic>{},
+                        );
                       }
-
-                      // 완료 시 제목/부제 회색
-                      final Color headerTextColor =
-                          isAllDone ? const Color(0xFF555555) : Colors.black87;
 
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          GestureDetector(
-                            onTap:
-                                () => setState(
-                                  () =>
-                                      expandedIndex = isExpanded ? null : index,
-                                ),
-                            child: Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
+                          roadHeader(),
+
+                          if (opened) ...[
+                            // ===== 동 드롭다운 =====
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF7F7F7),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                               child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  // 마커
-                                  Container(
-                                    width: 48,
-                                    height: 48,
-                                    decoration: BoxDecoration(
-                                      color: markerBg,
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Center(
-                                      child: SvgPicture.asset(
-                                        'assets/images/home/marker.svg',
-                                        width: 24,
-                                        height: 24,
-                                        color: markerIcon,
-                                      ),
+                                  const Text(
+                                    '동 선택',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                   const SizedBox(width: 12),
-                                  // 텍스트 블록
                                   Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                headerL1 +
-                                                    (isAllDone
-                                                        ? ' (배송완료)'
-                                                        : ''),
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 16,
-                                                  color: headerTextColor,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        if (headerL2.isNotEmpty)
-                                          Text(
-                                            headerL2,
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                              color: headerTextColor,
-                                            ),
-                                          ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          statusText,
-                                          style: TextStyle(
-                                            color: statusColor,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
+                                    child: DropdownButtonHideUnderline(
+                                      child: DropdownButton<String>(
+                                        isExpanded: true,
+                                        value: _selectedDongByRoad[roadName],
+                                        items:
+                                            dongNames
+                                                .map(
+                                                  (name) => DropdownMenuItem(
+                                                    value: name,
+                                                    child: Text(
+                                                      name,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                )
+                                                .toList(),
+                                        onChanged:
+                                            (v) => setState(() {
+                                              _selectedDongByRoad[roadName] = v;
+                                            }),
+                                      ),
                                     ),
-                                  ),
-                                  Icon(
-                                    isExpanded
-                                        ? Icons.keyboard_arrow_up_rounded
-                                        : Icons.keyboard_arrow_down_rounded,
                                   ),
                                 ],
                               ),
                             ),
-                          ),
-                          if (isExpanded) ...[
-                            const SizedBox(height: 10),
-                            _buildGroupedDropdownContent(index, item),
+                            const SizedBox(height: 12),
+
+                            // ===== 동 안의 아이템들(=여러 호 묶음) : 기존 카드 재사용 =====
+                            if (selectedDongBlock != null &&
+                                (selectedDongBlock['items'] as List)
+                                    .isNotEmpty) ...[
+                              for (
+                                int k = 0;
+                                k < (selectedDongBlock['items'] as List).length;
+                                k++
+                              ) ...[
+                                _buildGroupedDropdownContent(
+                                  (selectedDongBlock['indices'] as List)[k]
+                                      as int,
+                                  (selectedDongBlock['items'] as List)[k]
+                                      as Map<String, dynamic>,
+                                ),
+                                const SizedBox(height: 8),
+                                if (k <
+                                    (selectedDongBlock['items'] as List)
+                                            .length -
+                                        1)
+                                  Divider(color: Colors.grey[300], height: 1),
+                                const SizedBox(height: 8),
+                              ],
+                            ] else
+                              const Text(
+                                '해당 동에 표시할 항목이 없습니다.',
+                                style: TextStyle(color: Colors.grey),
+                              ),
                           ],
+
                           const SizedBox(height: 12),
                         ],
                       );
@@ -322,16 +465,15 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     );
   }
 
-  /// 호(동/호) 섹션 + 버튼 1개(묶음 처리)
+  /// 호(동/호) 섹션 + 버튼 1개(묶음 처리)  // 기존 로직 유지
   Widget _buildGroupedDropdownContent(
     int areaIndex,
     Map<String, dynamic> item,
   ) {
     final base = (item['base'] ?? '') as String;
     final units = (item['units'] as List?) ?? [];
-    int cursor = 0; // status 위치
+    int cursor = 0;
 
-    // 주소를 ‘…구/군/시’에서 줄바꿈 (유틸 사용)
     final split = splitAddressForTwoLines(base);
     final baseLine1 = split['line1'] ?? base;
     final baseLine2 = split['line2'] ?? '';
@@ -345,37 +487,30 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
             ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
         final count = prods.length;
 
-        // 이 호의 status 인덱스들
         final start = cursor;
         final myIndices = List.generate(count, (k) => start + k);
         cursor += count;
 
-        // 집계 상태 (유틸 사용)
         final statuses =
             myIndices.map((idx) => _safeStatus(areaIndex, idx)).toList();
         final agg = aggregateStatus(statuses); // 0/1/2
 
-        // 주소(두 줄)
         final fullAddrLine1 = baseLine1;
         final fullAddrLine2 =
             '${[baseLine2, unitLabel].where((s) => s.isNotEmpty).join(' ')}';
 
-        // 대표 전화/네비
         final String phone = (_firstPhone(prods) ?? '01012345678');
         final String navAddr =
             '${[baseLine1, baseLine2, unitLabel].where((s) => s.isNotEmpty).join(' ')}';
 
-        // 완료 묶음일 때 주소/아이콘/건수 회색
         final bool unitAllDone = (agg == 2);
         final Color addrTextColor =
             unitAllDone ? const Color(0xFFAAAAAA) : Colors.black87;
         final Color actionIconColor =
             unitAllDone ? const Color(0xFFAAAAAA) : const Color(0xFF61D5AB);
 
-        // 버튼 생성 (기존 로직 그대로)
         Widget buildUnitButton() {
           if (agg == 2) {
-            // 모두 완료 → 버튼/아이콘/글자 회색
             return OutlinedButton(
               onPressed: null,
               style: OutlinedButton.styleFrom(
@@ -409,7 +544,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
               ),
             );
           } else if (agg == 1) {
-            // 진행 중 → 도착 : '배송시작(1)'인 건만 완료 처리
             return ElevatedButton(
               onPressed: () async {
                 final idxToComplete = <int>[];
@@ -424,7 +558,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 if (prodsToComplete.isEmpty) return;
 
                 final first = prodsToComplete.first;
-
                 await showDialog(
                   context: context,
                   useRootNavigator: false,
@@ -446,18 +579,13 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                           }
 
                           bool anyFailed = false;
-
                           for (int i = 0; i < prodsToComplete.length; i++) {
                             final p = prodsToComplete[i];
 
-                            // 1) 완료 먼저 시도
                             var ok = await ApiService.updateProductStatus(
                               p['productId'],
                               '배송완료',
                             );
-
-                            // 2) 서버가 유효하지 않음(예: 아직 대기)일 수 있으니
-                            //    한 번만 시작→완료 순서로 재시도
                             if (!ok) {
                               final started =
                                   await ApiService.updateProductStatus(
@@ -471,19 +599,16 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                                 );
                               }
                             }
-
                             if (!ok) {
                               anyFailed = true;
                               continue;
                             }
 
-                            // 3) 이미지 전송
                             await ApiService.sendDeliveryImage(
                               productId: p['productId'],
                               imageUrl: url,
                             );
 
-                            // 4) 고객 SMS
                             final tel =
                                 (p['recipientPhone'] ?? '').toString().trim();
                             if (tel.isNotEmpty && tel.toLowerCase() != 'null') {
@@ -491,12 +616,9 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                               final uri = Uri.parse(
                                 'sms:$tel?body=${Uri.encodeComponent(smsText)}',
                               );
-                              if (await canLaunchUrl(uri)) {
-                                await launchUrl(uri);
-                              }
+                              if (await canLaunchUrl(uri)) await launchUrl(uri);
                             }
 
-                            // 5) 로컬 상태 반영
                             _setStatus(areaIndex, idxToComplete[i], 2);
                           }
 
@@ -508,8 +630,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                               ),
                             );
                           }
-
-                          // 상태 갱신
                           setState(() {});
                         },
                       ),
@@ -529,7 +649,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
               ),
             );
           } else {
-            // 대기 → 시작 : 'WAITING(0)'인 건만 시작
             return OutlinedButton(
               onPressed: () async {
                 final active = _findActiveDeliveryInfo();
@@ -572,7 +691,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 }
 
                 if (!mounted) return;
-                Navigator.of(context).pop(); // 로딩 닫기
+                Navigator.of(context).pop();
                 if (anyFailed) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('일부 건의 배송 시작 처리에 실패했습니다.')),
@@ -612,7 +731,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
-                          color: addrTextColor, // 완료면 회색
+                          color: addrTextColor,
                         ),
                       ),
                       Text(
@@ -620,7 +739,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
-                          color: addrTextColor, // 완료면 회색
+                          color: addrTextColor,
                         ),
                       ),
                       const SizedBox(height: 6),
@@ -631,8 +750,8 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                           fontWeight: FontWeight.w600,
                           color:
                               unitAllDone
-                                  ? const Color(0xFF888888) // 완료 시 회색
-                                  : const Color(0xFF2D5FFF), // 진행/대기 시 파랑
+                                  ? const Color(0xFF888888)
+                                  : const Color(0xFF2D5FFF),
                         ),
                       ),
                     ],
@@ -640,7 +759,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 ),
                 Row(
                   children: [
-                    // 전화 아이콘
                     GestureDetector(
                       onTap: () async {
                         final uri = Uri.parse('tel:$phone');
@@ -650,25 +768,23 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                         'assets/images/delivery/phone.svg',
                         width: 20,
                         height: 20,
-                        color: actionIconColor, // 완료면 회색
+                        color: actionIconColor,
                       ),
                     ),
                     const SizedBox(width: 12),
-                    // 내비 아이콘
                     GestureDetector(
                       onTap: () => startNaviToAddressWithNaver(navAddr),
                       child: SvgPicture.asset(
                         'assets/images/delivery/nav.svg',
                         width: 20,
                         height: 20,
-                        color: actionIconColor, // 완료면 회색
+                        color: actionIconColor,
                       ),
                     ),
                   ],
                 ),
               ],
             ),
-
             const SizedBox(height: 12),
             buildUnitButton(),
             const SizedBox(height: 24),
@@ -681,7 +797,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     );
   }
 
-  // 진행 중 경고 다이얼로그 (builder의 context 사용!)
+  // 진행 중 경고 다이얼로그
   Widget _activeWarnDialog(
     BuildContext dialogContext, {
     required String activeAddress,
@@ -690,7 +806,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     const double contentHeight = 145;
     final hasAddr = activeAddress.trim().isNotEmpty;
 
-    // 주소를 두 줄로 (유틸 사용)
     final split = splitAddressForTwoLines(activeAddress);
     final line1 = split['line1'] ?? activeAddress;
     final line2 = split['line2'] ?? '';
@@ -761,7 +876,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                       ),
                     ],
                   ),
-                  textAlign: TextAlign.left,
                 ),
                 if (hasAddr) ...[
                   const SizedBox(height: 8),
