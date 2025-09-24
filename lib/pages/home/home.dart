@@ -1,10 +1,11 @@
 import 'package:shimbox_app/pages/alarm/alarm.dart';
+import 'package:shimbox_app/controllers/location_controller.dart';
 
 import 'survey_module.dart';
 
 import 'package:shimbox_app/models/adjusted_volume_dialog.dart'; // TODO(임시 미리보기): 나중에 삭제 가능
 import 'package:shimbox_app/controllers/alarm_controller.dart'; // TODO(임시 미리보기)
-import 'package:shimbox_app/models/alarm_item.dart'; // TODO(임시 미리보기)
+import 'package:shimbox_app/models/alarm/alarm_item.dart'; // TODO(임시 미리보기)
 
 // 기존 import 유지
 import 'package:flutter/material.dart';
@@ -15,8 +16,6 @@ import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
-import 'package:shimbox_app/models/test_user_data.dart';
-import 'package:shimbox_app/models/test_user_data.dart';
 
 class HomePage extends StatefulWidget {
   @override
@@ -24,19 +23,30 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  late final BottomNavController bottomController;
+
   List<Map<String, dynamic>> deliveryAreas = []; // ✅ API 연동으로 대체됨
+
   int totalDeliveries = 0;
   int completedDeliveries = 0;
+
   final PageController _pageController = PageController();
+
   int _currentPage = 0;
   bool showSurvey = false;
 
-  final bottomController = Get.find<BottomNavController>();
+  // final bottomController = Get.find<BottomNavController>();
 
   @override
   void initState() {
     super.initState();
     fetchDeliverySummary();
+
+    // ✅ 현재 위치 추적 시작 (권한 요청 포함)
+    // 앱 최초 진입 시 한 번만 호출되어도 됨 (main에서 호출했다면 생략 가능)
+    LocationController.to.startTracking();
+
+    bottomController = Get.find<BottomNavController>();
   }
 
   Future<void> fetchDeliverySummary() async {
@@ -45,20 +55,44 @@ class _HomePageState extends State<HomePage> {
       int total = 0;
       int completed = 0;
 
+      // "서울특별시 성북구" 처럼 구 단위로 정규화
+      String normalizeToGu(String? raw) {
+        if (raw == null) return '';
+        final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+        return formatKoreanAddress(s); // 이미 파일에 있는 함수: 시/도 + 구 까지만 남김
+      }
+
+      // 구 단위로 합산
+      final Map<String, Map<String, int>> buckets = {};
+      for (final area in data) {
+        final key = normalizeToGu(area['shippingLocation']?.toString());
+        final int t = (area['totalCount'] ?? 0).toInt();
+        final int c = (area['completedCount'] ?? 0).toInt();
+
+        final slot = buckets.putIfAbsent(
+          key,
+          () => {'total': 0, 'completed': 0},
+        );
+        slot['total'] = (slot['total'] ?? 0) + t;
+        slot['completed'] = (slot['completed'] ?? 0) + c;
+
+        total += t;
+        completed += c;
+      }
+
       final areas =
-          data.map<Map<String, dynamic>>((area) {
-            final int totalCount = (area['totalCount'] ?? 0).toInt();
-            final int completedCount = (area['completedCount'] ?? 0).toInt();
-
-            total += totalCount;
-            completed += completedCount;
-
-            return {
-              'name': area['shippingLocation'],
-              'total': totalCount,
-              'completed': completedCount,
-            };
-          }).toList();
+          buckets.entries
+              .map(
+                (e) => {
+                  'name': e.key, // ← 리스트 아이템에서 그대로 사용
+                  'total': e.value['total']!,
+                  'completed': e.value['completed']!,
+                },
+              )
+              .toList()
+            ..sort(
+              (a, b) => (a['name'] as String).compareTo(b['name'] as String),
+            );
 
       setState(() {
         deliveryAreas = areas;
@@ -100,7 +134,6 @@ class _HomePageState extends State<HomePage> {
 
     final first = parts[0];
 
-    // 1) 특별시/광역시/특별자치시: "서울특별시 성북구" / "부산광역시 해운대구" 형태 → 앞 2토큰
     if (first.endsWith('특별시') ||
         first.endsWith('광역시') ||
         first.endsWith('특별자치시')) {
@@ -108,14 +141,12 @@ class _HomePageState extends State<HomePage> {
       return parts[0];
     }
 
-    // 2) 도/특별자치도: "경기도 성남시 분당구" / "제주특별자치도 제주시" 형태 → 보통 앞 3토큰(도 + 시/군 + 구/읍/면)
     if (first.endsWith('도') || first.endsWith('특별자치도')) {
       if (parts.length >= 3) return '${parts[0]} ${parts[1]} ${parts[2]}';
       if (parts.length >= 2) return '${parts[0]} ${parts[1]}';
       return parts[0];
     }
 
-    // 3) 기타 포맷 대비: 일단 앞 2토큰
     return parts.take(2).join(' ');
   }
 
@@ -147,7 +178,6 @@ class _HomePageState extends State<HomePage> {
     return Stack(
       children: [
         Scaffold(
-          // TODO(임시 미리보기): 물량 조정 팝업 테스트용 AppBar — 필요 없으면 아래 appBar 전체를 삭제하세요.
           appBar: AppBar(
             title: const Text('물량 조정 팝업 미리보기'),
             actions: [
@@ -155,23 +185,20 @@ class _HomePageState extends State<HomePage> {
                 tooltip: '팝업 띄우기(임시)',
                 icon: const Icon(Icons.notification_important_outlined),
                 onPressed: () async {
-                  // 예시 값 — 실제로는 DB 변경 감지 후 before/after로 바꿔 넣으세요
                   const int before = 300;
                   const int after = 230;
 
-                  // 팝업 띄우기
                   await AdjustedVolumeDialog.show(
                     context,
                     title: '건강 상태를 고려해 오늘 배송물량이',
                     titleLine2: '조정 되었습니다.',
                     description: '무리 없이 일하실 수 있도록',
-                    before: before, // ✅ 숫자 전달
-                    after: after, // ✅ 숫자 전달
+                    before: before,
+                    after: after,
                     iconColor: const Color(0xFF61D5AB),
                     width: 340,
                   );
 
-                  // TODO(임시 미리보기): 알림 페이지 갱신 예시 — 필요 없으면 아래 3줄 삭제
                   final alarm = Get.find<AlarmController>();
                   alarm.addAlarm(
                     AlarmItem(
@@ -189,7 +216,7 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 유저 정보 영역
+                  // 유저 정보 영역 -------------------------------------------------
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -205,18 +232,18 @@ class _HomePageState extends State<HomePage> {
                               fit: BoxFit.cover,
                             ),
                           ),
-                          SizedBox(width: 10),
+                          const SizedBox(width: 10),
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 '${UserData.name ?? '사용자'}님',
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 18,
                                 ),
                               ),
-                              SizedBox(height: 4),
+                              const SizedBox(height: 4),
                               Row(
                                 children: [
                                   SvgPicture.asset(
@@ -225,14 +252,33 @@ class _HomePageState extends State<HomePage> {
                                     height: 17,
                                     color: Colors.grey,
                                   ),
-                                  SizedBox(width: 5),
-                                  Text(
-                                    '${UserData.residence ?? '지역 정보 없음'}',
-                                    style: TextStyle(
-                                      color: Colors.grey,
-                                      fontSize: 13,
-                                    ),
-                                  ),
+                                  const SizedBox(width: 5),
+                                  // ✅ DB 주소 대신 현재 위치 주소 (LocationController)
+                                  Obx(() {
+                                    final raw =
+                                        LocationController
+                                            .to
+                                            .currentShortAddress
+                                            .value;
+                                    final pos =
+                                        LocationController
+                                            .to
+                                            .currentLatLng
+                                            .value;
+                                    final display =
+                                        raw.isNotEmpty
+                                            ? formatKoreanAddress(raw)
+                                            : (pos != null
+                                                ? '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}'
+                                                : '위치 확인 중...');
+                                    return Text(
+                                      display,
+                                      style: const TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 13,
+                                      ),
+                                    );
+                                  }),
                                 ],
                               ),
                             ],
@@ -257,7 +303,7 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
 
-                  SizedBox(height: 35),
+                  const SizedBox(height: 35),
 
                   // 출근/퇴근 박스 -------------------------------------------------
                   Center(
@@ -291,7 +337,7 @@ class _HomePageState extends State<HomePage> {
                       child: Container(
                         height: 90,
                         decoration: BoxDecoration(
-                          color: Color(0xFF61D5AB),
+                          color: const Color(0xFF61D5AB),
                           borderRadius: BorderRadius.circular(21),
                         ),
                         child: Stack(
@@ -344,16 +390,16 @@ class _HomePageState extends State<HomePage> {
                                           children: [
                                             Text(
                                               message,
-                                              style: TextStyle(
+                                              style: const TextStyle(
                                                 color: Colors.white,
                                                 fontSize: 12,
                                                 fontWeight: FontWeight.w500,
                                               ),
                                             ),
-                                            SizedBox(height: 6),
+                                            const SizedBox(height: 6),
                                             Text(
                                               label,
-                                              style: TextStyle(
+                                              style: const TextStyle(
                                                 fontSize: 20,
                                                 fontWeight: FontWeight.bold,
                                                 color: Colors.white,
@@ -362,8 +408,8 @@ class _HomePageState extends State<HomePage> {
                                           ],
                                         ),
                                         Container(
-                                          padding: EdgeInsets.all(8),
-                                          decoration: BoxDecoration(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: const BoxDecoration(
                                             color: Colors.white,
                                             shape: BoxShape.circle,
                                           ),
@@ -411,14 +457,14 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
 
-                  SizedBox(height: 50),
+                  const SizedBox(height: 50),
 
                   // 오늘의 배송 ----------------------------------------------------
-                  Text(
+                  const Text(
                     '오늘의 배송',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
-                  SizedBox(height: 8),
+                  const SizedBox(height: 8),
 
                   // 배송 상태(전체)
                   Row(
@@ -429,7 +475,7 @@ class _HomePageState extends State<HomePage> {
                         width: 78.68,
                         height: 61,
                       ),
-                      SizedBox(width: 12),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Padding(
                           padding: const EdgeInsets.only(top: 11.0),
@@ -441,7 +487,7 @@ class _HomePageState extends State<HomePage> {
                                   children: [
                                     TextSpan(
                                       text: '$completedDeliveries',
-                                      style: TextStyle(
+                                      style: const TextStyle(
                                         fontSize: 17,
                                         fontWeight: FontWeight.bold,
                                         color: Color(0xFF61D5AB),
@@ -449,7 +495,7 @@ class _HomePageState extends State<HomePage> {
                                     ),
                                     TextSpan(
                                       text: ' / $totalDeliveries 건 완료',
-                                      style: TextStyle(
+                                      style: const TextStyle(
                                         fontSize: 17,
                                         fontWeight: FontWeight.bold,
                                         color: Colors.black,
@@ -458,7 +504,7 @@ class _HomePageState extends State<HomePage> {
                                   ],
                                 ),
                               ),
-                              SizedBox(height: 8),
+                              const SizedBox(height: 8),
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(50),
                                 child: Stack(
@@ -476,7 +522,7 @@ class _HomePageState extends State<HomePage> {
                                               : 0,
                                       child: Container(
                                         height: 6,
-                                        color: Color(0xFF61D5AB),
+                                        color: const Color(0xFF61D5AB),
                                       ),
                                     ),
                                   ],
@@ -489,7 +535,7 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
 
-                  SizedBox(height: 16),
+                  const SizedBox(height: 16),
 
                   // 배송 목록 (지역별 진행 상태 표시) -------------------------------
                   Expanded(
@@ -498,7 +544,6 @@ class _HomePageState extends State<HomePage> {
                       itemBuilder: (context, index) {
                         final area = deliveryAreas[index];
 
-                        // ✅ 진행/완료 상태 판별
                         final bool inProgress = _isAreaInProgress(area);
                         final bool completed = _isAreaCompleted(area);
 
@@ -515,7 +560,6 @@ class _HomePageState extends State<HomePage> {
                               width: 48,
                               height: 48,
                               decoration: BoxDecoration(
-                                // 배경: 진행중만 초록, 나머지는 회색
                                 color:
                                     inProgress
                                         ? const Color(0xFF61D5AB)
@@ -527,7 +571,6 @@ class _HomePageState extends State<HomePage> {
                                   'assets/images/home/marker.svg',
                                   width: 24,
                                   height: 24,
-                                  // 아이콘: 진행중=흰색, 완료=초록, 미완료=검정
                                   color:
                                       inProgress
                                           ? Colors.white
@@ -544,8 +587,6 @@ class _HomePageState extends State<HomePage> {
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-
-                            // 진행 상태 문구
                             subtitle: Text(
                               _areaStatusText(area),
                               style: TextStyle(
@@ -554,12 +595,11 @@ class _HomePageState extends State<HomePage> {
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
-                            trailing: Padding(
-                              padding: const EdgeInsets.only(left: 8),
+                            trailing: const Padding(
+                              padding: EdgeInsets.only(left: 8),
                               child: Icon(Icons.chevron_right, size: 28),
                             ),
                             onTap: () async {
-                              // 상세에서 변경이 있으면 돌아올 때 요약 재조회
                               final changed =
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
@@ -585,9 +625,11 @@ class _HomePageState extends State<HomePage> {
 
               final dummySuccess = await ApiService.createDummyHealthRecord();
               if (!dummySuccess) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text('건강 데이터 생성 실패')));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text('건강 데이터 생성 실패')));
+                }
                 return;
               }
 
@@ -601,9 +643,11 @@ class _HomePageState extends State<HomePage> {
               );
 
               if (!surveySuccess) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text('설문 제출 실패')));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text('설문 제출 실패')));
+                }
                 return;
               }
 
@@ -613,9 +657,11 @@ class _HomePageState extends State<HomePage> {
 
               final offSuccess = await ApiService.updateAttendanceStatus("퇴근");
               if (!offSuccess) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text('퇴근 상태 변경 실패')));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text('퇴근 상태 변경 실패')));
+                }
                 return;
               }
 
