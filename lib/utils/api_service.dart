@@ -10,6 +10,8 @@ import '../models/login_response.dart';
 import '../models/test_user_data.dart' as localUser;
 import 'package:shimbox_app/models/map/map_poi.dart';
 
+
+
 class ApiService {
   static const String baseUrl = 'http://116.39.208.72:26443';
 
