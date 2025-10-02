@@ -1,21 +1,21 @@
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
-
 import 'survey_module.dart';
 
-import 'package:shimbox_app/models/adjusted_volume_dialog.dart'; // TODO(임시 미리보기): 나중에 삭제 가능
-import 'package:shimbox_app/controllers/alarm_controller.dart'; // TODO(임시 미리보기)
-import 'package:shimbox_app/models/alarm/alarm_item.dart'; // TODO(임시 미리보기)
+import 'package:shimbox_app/models/adjusted_volume_dialog.dart';
+import 'package:shimbox_app/controllers/alarm_controller.dart';
+import 'package:shimbox_app/models/alarm/alarm_item.dart';
 
-// 기존 import 유지
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
-import 'package:get/get_core/src/get_main.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
+
+// 위치 WS 전송 서비스
+import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HomePage extends StatefulWidget {
   @override
@@ -25,28 +25,43 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   late final BottomNavController bottomController;
 
-  List<Map<String, dynamic>> deliveryAreas = []; // ✅ API 연동으로 대체됨
-
+  List<Map<String, dynamic>> deliveryAreas = [];
   int totalDeliveries = 0;
   int completedDeliveries = 0;
 
   final PageController _pageController = PageController();
-
   int _currentPage = 0;
   bool showSurvey = false;
-
-  // final bottomController = Get.find<BottomNavController>();
 
   @override
   void initState() {
     super.initState();
     fetchDeliverySummary();
 
-    // ✅ 현재 위치 추적 시작 (권한 요청 포함)
-    // 앱 최초 진입 시 한 번만 호출되어도 됨 (main에서 호출했다면 생략 가능)
+    // 현재 위치 추적 시작
     LocationController.to.startTracking();
 
     bottomController = Get.find<BottomNavController>();
+
+    // WebSocket 연결 (지역값 기반)
+    _connectLocationWsOnce();
+
+    // 앱 진입 시 강제로 현재 위치 1회 전송 (Postman에서 바로 확인 가능)
+    Future.delayed(Duration(seconds: 2), () {
+      final pos = LocationController.to.currentLatLng.value;
+      final addr = LocationController.to.currentShortAddress.value;
+      if (pos != null) {
+        LocationSocketService.instance.sendLocation(
+          lat: pos.latitude,
+          lng: pos.longitude,
+          capturedAtUtc: DateTime.now().toUtc(),
+          addressShort: addr,
+        );
+        print("🛰️ 초기 위치 전송: $pos / $addr");
+      } else {
+        print("⚠️ 초기 위치 없음 → 전송 스킵됨");
+      }
+    });
   }
 
   Future<void> fetchDeliverySummary() async {
@@ -55,14 +70,12 @@ class _HomePageState extends State<HomePage> {
       int total = 0;
       int completed = 0;
 
-      // "서울특별시 성북구" 처럼 구 단위로 정규화
       String normalizeToGu(String? raw) {
         if (raw == null) return '';
         final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
-        return formatKoreanAddress(s); // 이미 파일에 있는 함수: 시/도 + 구 까지만 남김
+        return formatKoreanAddress(s);
       }
 
-      // 구 단위로 합산
       final Map<String, Map<String, int>> buckets = {};
       for (final area in data) {
         final key = normalizeToGu(area['shippingLocation']?.toString());
@@ -84,7 +97,7 @@ class _HomePageState extends State<HomePage> {
           buckets.entries
               .map(
                 (e) => {
-                  'name': e.key, // ← 리스트 아이템에서 그대로 사용
+                  'name': e.key,
                   'total': e.value['total']!,
                   'completed': e.value['completed']!,
                 },
@@ -112,12 +125,10 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _pageController.dispose();
+    LocationSocketService.instance.disconnect();
     super.dispose();
   }
 
-  // =========================
-  // ✅ 진행률/상태 텍스트 & 색상
-  // =========================
   String _areaStatusText(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -153,25 +164,42 @@ class _HomePageState extends State<HomePage> {
   Color _areaStatusColor(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    if (total > 0 && done >= total) return const Color(0xFF61D5AB); // 완료 → 초록
-    if (done == 0) return Colors.grey; // 미완료 → 회색
-    return const Color(0xFF747474); // 진행중 → 진한 회색
+    if (total > 0 && done >= total) return const Color(0xFF61D5AB);
+    if (done == 0) return Colors.grey;
+    return const Color(0xFF747474);
   }
 
-  // ✅ 추가: "진행 중.." 여부 (0 < done < total)
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
     return total > 0 && done > 0 && done < total;
   }
 
-  // ✅ 추가: "완료" 여부 (done >= total)
   bool _isAreaCompleted(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
     return total > 0 && done >= total;
   }
-  // =========================
+
+  String _extractGu(String? s) {
+    if (s == null) return '';
+    final t = s.trim();
+    final m = RegExp(r'([가-힣A-Za-z]+구)').firstMatch(t);
+    return m != null ? m.group(1)! : t;
+  }
+
+  Future<void> _connectLocationWsOnce() async {
+    final raw = LocationController.to.currentShortAddress.value;
+    String region = _extractGu(raw);
+
+    if (region.isEmpty && deliveryAreas.isNotEmpty) {
+      region = _extractGu(deliveryAreas.first['name']?.toString());
+    }
+
+    if (region.isEmpty) region = '성북구';
+
+    await LocationSocketService.instance.connect(region: region);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -253,7 +281,7 @@ class _HomePageState extends State<HomePage> {
                                     color: Colors.grey,
                                   ),
                                   const SizedBox(width: 5),
-                                  // ✅ DB 주소 대신 현재 위치 주소 (LocationController)
+                                  // DB 주소 대신 현재 위치 주소 (LocationController)
                                   Obx(() {
                                     final raw =
                                         LocationController
