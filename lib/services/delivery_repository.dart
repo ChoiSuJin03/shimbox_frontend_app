@@ -1,13 +1,14 @@
-/// - 기존 fetchData()의 데이터 파싱/그룹핑/정렬만 담당.
+// 기존 fetchData()의 데이터 파싱/그룹핑/정렬만 담당.
 
 import '../utils/address_utils.dart';
 import '../utils/status_utils.dart';
-import '../utils/api_service.dart'; // 상대경로: pages가 아니라 services 기준!
+import '../utils/api_service.dart';
 
 class DeliveryRepositoryResult {
   final List<Map<String, dynamic>>
   deliveryAreas; // [{name, base, building, total, units: [...]}, ...]
   final List<List<int>> deliveryStatus; // area별 status 일렬화
+
   DeliveryRepositoryResult({
     required this.deliveryAreas,
     required this.deliveryStatus,
@@ -16,6 +17,7 @@ class DeliveryRepositoryResult {
 
 class DeliveryRepository {
   Future<DeliveryRepositoryResult> fetchAreas() async {
+    // 서버 요약 가져오기 (ApiService.get 내부에서 캐시 무효화 처리)
     final data = await ApiService.fetchDeliverySummary();
 
     final List<Map<String, dynamic>> result = [];
@@ -25,7 +27,7 @@ class DeliveryRepository {
       final String base = (area['shippingLocation'] ?? '') as String;
       final List groups = (area['groups'] as List?) ?? [];
 
-      // building → unit → products[]
+      // building -> unit -> products[]
       final Map<String, Map<String, List<Map<String, dynamic>>>> grouped = {};
 
       for (final g in groups) {
@@ -63,11 +65,16 @@ class DeliveryRepository {
               });
 
         final List<int> statuses = [];
+        // services/delivery_repository.dart (핵심만 발췌)
         for (final u in units) {
           final plist =
               ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
           for (final prod in plist) {
             final s = statusToInt((prod['shippingStatus'] ?? '') as String);
+
+            // ✅ productId → statusIndex 매핑을 위해 상품에 인덱스 박제
+            prod['__statusIndex'] = statuses.length;
+
             statuses.add(s);
           }
         }

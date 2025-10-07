@@ -1,3 +1,4 @@
+// lib/pages/home/home_page.dart
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'survey_module.dart';
@@ -14,7 +15,6 @@ import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
 
-// 위치 WS 전송 서비스
 import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HomePage extends StatefulWidget {
@@ -22,7 +22,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final BottomNavController bottomController;
 
   List<Map<String, dynamic>> deliveryAreas = [];
@@ -36,32 +36,40 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    fetchDeliverySummary();
+    WidgetsBinding.instance.addObserver(this);
 
-    // 현재 위치 추적 시작
-    LocationController.to.startTracking();
+    fetchDeliverySummary();
 
     bottomController = Get.find<BottomNavController>();
 
-    // WebSocket 연결 (지역값 기반)
+    // 지역값으로 WS 연결
     _connectLocationWsOnce();
 
-    // 앱 진입 시 강제로 현재 위치 1회 전송 (Postman에서 바로 확인 가능)
-    Future.delayed(Duration(seconds: 2), () {
-      final pos = LocationController.to.currentLatLng.value;
-      final addr = LocationController.to.currentShortAddress.value;
-      if (pos != null) {
-        LocationSocketService.instance.sendLocation(
-          lat: pos.latitude,
-          lng: pos.longitude,
-          capturedAtUtc: DateTime.now().toUtc(),
-          addressShort: addr,
-        );
-        print("🛰️ 초기 위치 전송: $pos / $addr");
-      } else {
-        print("⚠️ 초기 위치 없음 → 전송 스킵됨");
-      }
-    });
+    // ✅ 홈 최초 진입: 즉시 1회 전송 예약
+    LocationSocketService.instance.markHomeEntered();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 앱이 백그라운드 -> 포그라운드(Resumed)로 돌아왔고 홈이 보이는 상태라면 1회 전송 예약
+    if (state == AppLifecycleState.resumed) {
+      LocationSocketService.instance.markHomeEntered();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버 (빌드 컨텍스트 확보 후)
+    LocationSocketService.instance.markHomeEntered();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _pageController.dispose();
+    LocationSocketService.instance.disconnect();
+    super.dispose();
   }
 
   Future<void> fetchDeliverySummary() async {
@@ -120,13 +128,6 @@ class _HomePageState extends State<HomePage> {
   String getShortName(String fullName) {
     if (fullName.length <= 2) return fullName;
     return fullName.substring(fullName.length - 2);
-  }
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    LocationSocketService.instance.disconnect();
-    super.dispose();
   }
 
   String _areaStatusText(Map<String, dynamic> area) {
@@ -244,7 +245,7 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 유저 정보 영역 -------------------------------------------------
+                  // 유저 정보
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -281,7 +282,6 @@ class _HomePageState extends State<HomePage> {
                                     color: Colors.grey,
                                   ),
                                   const SizedBox(width: 5),
-                                  // DB 주소 대신 현재 위치 주소 (LocationController)
                                   Obx(() {
                                     final raw =
                                         LocationController
@@ -333,7 +333,7 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 35),
 
-                  // 출근/퇴근 박스 -------------------------------------------------
+                  // 출근/퇴근 박스
                   Center(
                     child: GestureDetector(
                       onTap: () async {
@@ -487,14 +487,13 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 50),
 
-                  // 오늘의 배송 ----------------------------------------------------
+                  // 오늘의 배송
                   const Text(
                     '오늘의 배송',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
 
-                  // 배송 상태(전체)
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -565,7 +564,6 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 16),
 
-                  // 배송 목록 (지역별 진행 상태 표시) -------------------------------
                   Expanded(
                     child: ListView.builder(
                       itemCount: deliveryAreas.length,

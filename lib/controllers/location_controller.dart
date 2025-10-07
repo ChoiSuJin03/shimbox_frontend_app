@@ -6,7 +6,6 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
-// 추가: WebSocket 전송 서비스
 import 'package:shimbox_app/services/location_socket_service.dart';
 
 class LocationController extends GetxController {
@@ -65,11 +64,10 @@ class LocationController extends GetxController {
       currentLatLng.value = latlng;
       _scheduleReverseGeocode(latlng);
 
-      // 최초 위치도 전송
-      LocationSocketService.instance.sendLocation(
+      // 초기 좌표/주소 등록 (전송은 서비스의 예약 로직이 담당)
+      LocationSocketService.instance.updateLatestPosition(
         lat: pos.latitude,
         lng: pos.longitude,
-        capturedAtUtc: DateTime.now().toUtc(),
         addressShort: currentShortAddress.value,
       );
     } catch (e) {
@@ -87,11 +85,10 @@ class LocationController extends GetxController {
       currentLatLng.value = latlng;
       _scheduleReverseGeocode(latlng);
 
-      // 주기적 위치 전송
-      LocationSocketService.instance.sendLocation(
+      // 주기 전송은 서비스가 담당 → 최신 좌표만 갱신
+      LocationSocketService.instance.updateLatestPosition(
         lat: pos.latitude,
         lng: pos.longitude,
-        capturedAtUtc: DateTime.now().toUtc(),
         addressShort: currentShortAddress.value,
       );
     });
@@ -103,11 +100,9 @@ class LocationController extends GetxController {
       _scheduleReverseGeocode(latlng);
     }
 
-    // 수동 설정 시도 시에도 전송
-    LocationSocketService.instance.sendLocation(
+    LocationSocketService.instance.updateLatestPosition(
       lat: latlng.latitude,
       lng: latlng.longitude,
-      capturedAtUtc: DateTime.now().toUtc(),
       addressShort: currentShortAddress.value,
     );
   }
@@ -172,13 +167,11 @@ class LocationController extends GetxController {
       currentShortAddress.value = short;
       print('✅ [Kakao Local] 주소 업데이트: $short');
 
-      // 주소 갱신 시에도 WS 전송
       final pos = currentLatLng.value;
       if (pos != null) {
-        LocationSocketService.instance.sendLocation(
+        LocationSocketService.instance.updateLatestPosition(
           lat: pos.latitude,
           lng: pos.longitude,
-          capturedAtUtc: DateTime.now().toUtc(),
           addressShort: short,
         );
       }

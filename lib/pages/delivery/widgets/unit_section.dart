@@ -1,18 +1,16 @@
-/// - 한 동/호 블록(주소 두 줄 + 건수 + 전화/내비 + 액션 버튼).
-
 import 'package:flutter/material.dart';
 import '../../../../utils/address_utils.dart';
 import 'unit_action_button.dart';
 
 class UnitSection extends StatelessWidget {
   final String base; // 기본주소
-  final String unitLabel; // "1002호"
+  final String unitLabel; // "301동 102호"
   final List<Map<String, dynamic>> prods;
   final int aggregate; // 0/1/2
-  final VoidCallback onPhoneTap; // 전화
-  final VoidCallback onNaviTap; // 내비
-  final VoidCallback onStart; // '배송 시작'
-  final Future<void> Function() onArrive; // '배송 도착'
+  final VoidCallback onPhoneTap;
+  final VoidCallback onNaviTap;
+  final VoidCallback onStart;
+  final Future<void> Function() onArrive;
 
   const UnitSection({
     super.key,
@@ -90,11 +88,7 @@ class UnitSection extends StatelessWidget {
               children: [
                 GestureDetector(
                   onTap: onPhoneTap,
-                  child: Icon(
-                    Icons.phone,
-                    size: 20,
-                    color: actionIconColor,
-                  ), // SVG 사용 시 교체
+                  child: Icon(Icons.phone, size: 20, color: actionIconColor),
                 ),
                 const SizedBox(width: 12),
                 GestureDetector(
@@ -103,7 +97,7 @@ class UnitSection extends StatelessWidget {
                     Icons.navigation,
                     size: 20,
                     color: actionIconColor,
-                  ), // SVG 사용 시 교체
+                  ),
                 ),
               ],
             ),

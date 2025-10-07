@@ -17,11 +17,64 @@ class LocationSocketService {
   Timer? _pingTimer;
   Timer? _reconnectTimer;
 
+  // 1분 주기 전송
+  Timer? _periodicTimer;
+  static const Duration _periodicInterval = Duration(minutes: 1);
+
+  // 최신 위치/주소 캐시
+  double? _latestLat;
+  double? _latestLng;
+  String? _latestAddress;
+
+  // 홈 진입 시 즉시 1회 전송 예약 플래그
+  bool _pendingEnterSend = false;
+
   String? _region;
   String? _token;
   Uri? _wsUri;
 
   bool get isConnected => _ch != null;
+
+  /// 홈 화면에 들어왔을 때 호출: "즉시 1회"를 예약하고, 가능하면 즉시 전송
+  void markHomeEntered() {
+    _pendingEnterSend = true;
+    _trySendEnterNow();
+  }
+
+  /// 컨트롤러가 최신 좌표/주소를 알려줄 때 호출
+  void updateLatestPosition({
+    required double lat,
+    required double lng,
+    String? addressShort,
+  }) {
+    _latestLat = lat;
+    _latestLng = lng;
+    if (addressShort != null && addressShort.isNotEmpty) {
+      _latestAddress = addressShort;
+    }
+    _trySendEnterNow(); // 좌표가 갱신되면, 예약된 1회 전송을 시도
+  }
+
+  /// 지금 가진 최신 좌표를 즉시 1회 전송
+  void sendLatestNow() {
+    if (_ch == null) return;
+    if (_latestLat == null || _latestLng == null) return;
+    sendLocation(
+      lat: _latestLat!,
+      lng: _latestLng!,
+      capturedAtUtc: DateTime.now().toUtc(),
+      addressShort: _latestAddress,
+    );
+  }
+
+  /// 예약된 "홈 진입 1회" 전송을 조건 만족 시 실행
+  void _trySendEnterNow() {
+    if (!_pendingEnterSend) return;
+    if (!isConnected) return;
+    if (_latestLat == null || _latestLng == null) return;
+    sendLatestNow();
+    _pendingEnterSend = false;
+  }
 
   Uri _buildWsUri({required String token, required String region}) {
     final httpUri = Uri.parse(ApiService.baseUrl);
@@ -58,7 +111,6 @@ class LocationSocketService {
       _ch = WebSocketChannel.connect(_wsUri!);
       _sub = _ch!.stream.listen(
         (event) {
-          // 서버 응답 확인용 로그
           // print('WS <- $event');
         },
         onDone: _scheduleReconnect,
@@ -66,12 +118,22 @@ class LocationSocketService {
         cancelOnError: true,
       );
 
-      // keepalive
+      // keepalive ping (30초)
       _pingTimer?.cancel();
       _pingTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         try {
           _ch?.sink.add(jsonEncode({'type': 'ping'}));
         } catch (_) {}
+      });
+
+      // 연결 직후: 홈 진입 1회 전송 예약이 있다면 바로 시도
+      // (좌표가 이미 준비돼 있으면 즉시 전송됨)
+      Future.microtask(_trySendEnterNow);
+
+      // 1분 주기 전송 시작
+      _periodicTimer?.cancel();
+      _periodicTimer = Timer.periodic(_periodicInterval, (_) {
+        sendLatestNow();
       });
     } catch (_) {
       _scheduleReconnect();
@@ -87,6 +149,9 @@ class LocationSocketService {
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();
     _pingTimer = null;
+
+    _periodicTimer?.cancel();
+    _periodicTimer = null;
 
     await _sub?.cancel();
     _sub = null;
@@ -105,7 +170,7 @@ class LocationSocketService {
     });
   }
 
-  /// 위치 전송
+  /// 실제 WS 전송
   void sendLocation({
     required double lat,
     required double lng,
