@@ -250,68 +250,95 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          ClipOval(
-                            child: Image.asset(
-                              'assets/images/home/hong.png',
-                              width: 63.84,
-                              height: 63,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${UserData.name ?? '사용자'}님',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18,
-                                ),
+                      // ⬅️ 왼쪽 묶음을 Expanded로 감싸고, 내부 Column에도 폭 제약 전달
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipOval(
+                              child: Image.asset(
+                                'assets/images/home/hong.png',
+                                width: 63.84,
+                                height: 63,
+                                fit: BoxFit.cover,
                               ),
-                              const SizedBox(height: 4),
-                              Row(
+                            ),
+                            const SizedBox(width: 10),
+                            // Column에 확실히 width 제약 전달
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  SvgPicture.asset(
-                                    'assets/images/home/marker.svg',
-                                    width: 17,
-                                    height: 17,
-                                    color: Colors.grey,
+                                  Text(
+                                    '${UserData.name ?? '사용자'}님',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 18,
+                                    ),
                                   ),
-                                  const SizedBox(width: 5),
-                                  Obx(() {
-                                    final raw =
-                                        LocationController
-                                            .to
-                                            .currentShortAddress
-                                            .value;
-                                    final pos =
-                                        LocationController
-                                            .to
-                                            .currentLatLng
-                                            .value;
-                                    final display =
-                                        raw.isNotEmpty
-                                            ? formatKoreanAddress(raw)
-                                            : (pos != null
-                                                ? '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}'
-                                                : '위치 확인 중...');
-                                    return Text(
-                                      display,
-                                      style: const TextStyle(
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize:
+                                        MainAxisSize.min, // shrink-wrap
+                                    children: [
+                                      SvgPicture.asset(
+                                        'assets/images/home/marker.svg',
+                                        width: 17,
+                                        height: 17,
                                         color: Colors.grey,
-                                        fontSize: 13,
                                       ),
-                                    );
-                                  }),
+                                      const SizedBox(width: 5),
+                                      // 기존 Flexible(...) 안의 Obx 교체
+                                      Flexible(
+                                        fit: FlexFit.loose,
+                                        child: Obx(() {
+                                          final full =
+                                              LocationController
+                                                  .to
+                                                  .currentFullAddress
+                                                  .value
+                                                  .trim();
+                                          final short =
+                                              LocationController
+                                                  .to
+                                                  .currentShortAddress
+                                                  .value
+                                                  .trim();
+                                          final pos =
+                                              LocationController
+                                                  .to
+                                                  .currentLatLng
+                                                  .value;
+
+                                          final display =
+                                              full.isNotEmpty
+                                                  ? full
+                                                  : (short.isNotEmpty
+                                                      ? short
+                                                      : (pos != null
+                                                          ? '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}'
+                                                          : '위치 확인 중...'));
+
+                                          return Text(
+                                            display.replaceAll('\n', ' '),
+                                            style: const TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 13,
+                                            ),
+                                            softWrap: true, // ✅ 전체 줄바꿈 허용
+                                            // maxLines/overflow 없음 → 끝까지 표시
+                                          );
+                                        }),
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
-                            ],
-                          ),
-                        ],
+                            ),
+                          ],
+                        ),
                       ),
                       GestureDetector(
                         onTap:
@@ -679,7 +706,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
               final now = DateTime.now();
               final time =
-                  '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+                  '${now.hour.toString().padLeft(2, '0')}:${now.minute.toStringAsFixed(0).padLeft(2, '0')}';
 
               final offSuccess = await ApiService.updateAttendanceStatus("퇴근");
               if (!offSuccess) {

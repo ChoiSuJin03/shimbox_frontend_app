@@ -14,6 +14,9 @@ class LocationController extends GetxController {
   final Rx<LatLng?> currentLatLng = Rx<LatLng?>(null);
   final RxString currentShortAddress = ''.obs;
 
+  // ✅ 전체 주소 노출용 필드 (추가)
+  final RxString currentFullAddress = ''.obs;
+
   final String _kakaoApiKey = 'a4ba47d483e2d8f8681d6c36474ff4fd';
 
   StreamSubscription<Position>? _posSub;
@@ -39,6 +42,8 @@ class LocationController extends GetxController {
     if (!enabled) {
       print('❌ [Location] 위치 서비스 꺼짐');
       currentShortAddress.value = '';
+      // ✅ 전체 주소도 초기화
+      currentFullAddress.value = '';
       return;
     }
 
@@ -52,6 +57,8 @@ class LocationController extends GetxController {
         perm == LocationPermission.deniedForever) {
       print('❌ [Location] 권한 거부: $perm');
       currentShortAddress.value = '';
+      // ✅ 전체 주소도 초기화
+      currentFullAddress.value = '';
       return;
     }
 
@@ -122,7 +129,10 @@ class LocationController extends GetxController {
 
     _reverseDebounce?.cancel();
     _reverseDebounce = Timer(const Duration(milliseconds: 400), () {
+      // ✅ 기존: 축약 주소 업데이트
       _updateShortAddressBy(latlng);
+      // ✅ 추가: 전체 주소 업데이트
+      _updateFullAddressBy(latlng);
     });
   }
 
@@ -178,6 +188,82 @@ class LocationController extends GetxController {
     } catch (e) {
       print('❌ [Kakao Local] 예외: $e');
       currentShortAddress.value = '';
+    }
+  }
+
+  // ✅ 추가: 전체 주소 업데이트 (coord2address 사용)
+  Future<void> _updateFullAddressBy(LatLng latlng) async {
+    try {
+      final url =
+          'https://dapi.kakao.com/v2/local/geo/coord2address.json'
+          '?x=${latlng.longitude}&y=${latlng.latitude}';
+
+      final res = await http
+          .get(
+            Uri.parse(url),
+            headers: {'Authorization': 'KakaoAK $_kakaoApiKey'},
+          )
+          .timeout(const Duration(seconds: 6));
+
+      if (res.statusCode != 200) {
+        print('❌ [Kakao Local] (full) 실패 status=${res.statusCode}');
+        currentFullAddress.value = '';
+        return;
+      }
+
+      final data = json.decode(res.body);
+      final docs = (data['documents'] as List?) ?? [];
+      if (docs.isEmpty) {
+        print('❌ [Kakao Local] (full) documents 없음');
+        currentFullAddress.value = '';
+        return;
+      }
+
+      // 도로명 주소가 있으면 우선 사용, 없으면 지번 주소 사용
+      final road = docs.first['road_address'];
+      final addr = docs.first['address'];
+
+      String full = '';
+      if (road != null) {
+        // 예: 경기도 광명시 광명동 오리로 1250-0 101동 101호
+        final r1 = road['region_1depth_name'] ?? '';
+        final r2 = road['region_2depth_name'] ?? '';
+        final r3 = road['region_3depth_name'] ?? '';
+        final roadName = road['road_name'] ?? '';
+        final mainNo = road['main_building_no'] ?? '';
+        final subNo =
+            (road['sub_building_no'] ?? '').toString().isNotEmpty
+                ? '-${road['sub_building_no']}'
+                : '';
+        final building = (road['building_name'] ?? '').toString().trim();
+        final zone = (road['zone_no'] ?? '').toString().trim();
+
+        // building/zone 존재 시 괄호로 보조 정보 덧붙임
+        final extra = [
+          building.isNotEmpty ? building : null,
+          zone.isNotEmpty ? zone : null,
+        ].whereType<String>().join(', ');
+
+        full =
+            '$r1 $r2 $r3 $roadName $mainNo$subNo${extra.isNotEmpty ? ' ($extra)' : ''}'
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+      } else if (addr != null) {
+        final r1 = addr['region_1depth_name'] ?? '';
+        final r2 = addr['region_2depth_name'] ?? '';
+        final r3 = addr['region_3depth_name'] ?? '';
+        final mNo = (addr['main_address_no'] ?? '').toString();
+        final sNo = (addr['sub_address_no'] ?? '').toString();
+        final detail = sNo.isNotEmpty ? '$mNo-$sNo' : mNo;
+
+        full = '$r1 $r2 $r3 $detail'.replaceAll(RegExp(r'\s+'), ' ').trim();
+      }
+
+      currentFullAddress.value = full;
+      print('✅ [Kakao Local] 전체 주소 업데이트: $full');
+    } catch (e) {
+      print('❌ [Kakao Local] (full) 예외: $e');
+      currentFullAddress.value = '';
     }
   }
 }
