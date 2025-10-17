@@ -1,19 +1,19 @@
-// lib/pages/map/map_page.dart
+// lib/pages/map/map_page_full.dart
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:geolocator/geolocator.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 
 import 'widgets/map_action_header.dart';
 import 'package:shimbox_app/utils/api_service.dart';
-import 'widgets/bottom_sheet.dart';
-
-// SVG 숫자/라벨 마커
 import 'widgets/numbered_marker_icon.dart';
+import 'widgets/bottom_sheet.dart';
 
 class MapPage extends StatefulWidget {
   const MapPage({Key? key}) : super(key: key);
@@ -30,11 +30,11 @@ class _MapPageState extends State<MapPage> {
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<CompassEvent>? _compassSubscription;
 
-  // 방문 순서 결과 저장
+  // 방문 순서
   List<_Stop> _orderedStops = [];
-  Map<LatLng, int> _orderIndex = {}; // point -> 1-based index
+  Map<LatLng, int> _orderIndex = {};
 
-  List<_Stop> _nearestStopsWithLabel = []; // 가까운 후보 (라벨 포함)
+  List<_Stop> _nearestStopsWithLabel = [];
   List<LatLng> get _nearestStops =>
       _nearestStopsWithLabel.map((e) => e.point).toList();
 
@@ -47,12 +47,13 @@ class _MapPageState extends State<MapPage> {
 
   bool _loadingStops = false;
 
+  // 문자열 키 → 같은 키로 모은 목록(보조)
   Map<String, List<Map<String, String>>> apartmentGroups = {};
 
-  // ==== Config ====
-  static const _kakaoRestKey = 'a4ba47d483e2d8f8681d6c36474ff4fd';
+  // 좌표 반경 검색용 풀목록
+  final List<_GeoRow> _geoRows = [];
 
-  // SVG 경로 (출발: 파랑, 경유지: 빨강)
+  static const _kakaoRestKey = 'a4ba47d483e2d8f8681d6c36474ff4fd';
   static const _pinBlue = 'assets/images/map/pin_blue.svg';
   static const _pinRed = 'assets/images/map/pin_red.svg';
 
@@ -76,23 +77,11 @@ class _MapPageState extends State<MapPage> {
     super.dispose();
   }
 
-  // 초기화 & 현재 위치
-  Future<void> _initializeMap() async {
-    try {
-      final loc = await _fetchCurrentLocation();
-      if (!mounted) return;
-      currentLocation = loc;
-      await _refreshMarkers(); // 초기 마커 반영
-      mapController?.animateCamera(CameraUpdate.newLatLngZoom(loc, 17));
-    } catch (e) {
-      debugPrint('❌ 초기화 실패: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('현재 위치를 가져올 수 없습니다. 권한을 확인하세요.')),
-        );
-      }
-    }
-  }
+  String _normalizeKey(String s) =>
+      s
+          .replaceAll(RegExp(r'[\r\n]+'), ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
 
   Future<LatLng> _fetchCurrentLocation() async {
     LocationPermission permission = await Geolocator.checkPermission();
@@ -110,6 +99,22 @@ class _MapPageState extends State<MapPage> {
     return LatLng(position.latitude, position.longitude);
   }
 
+  Future<void> _initializeMap() async {
+    try {
+      final loc = await _fetchCurrentLocation();
+      if (!mounted) return;
+      currentLocation = loc;
+      await _refreshMarkers();
+      mapController?.animateCamera(CameraUpdate.newLatLngZoom(loc, 17));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('현재 위치 권한을 확인해주세요.')));
+      }
+    }
+  }
+
   void _startTracking() {
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -119,9 +124,7 @@ class _MapPageState extends State<MapPage> {
     ).listen((position) async {
       final loc = LatLng(position.latitude, position.longitude);
       if (!mounted) return;
-      setState(() {
-        currentLocation = loc;
-      });
+      setState(() => currentLocation = loc);
       await _refreshMarkers(keepStops: true);
       if (!_isUserInteracting) {
         mapController?.animateCamera(CameraUpdate.newLatLng(loc));
@@ -155,49 +158,103 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // DB → 주소 → 좌표 → 가까운 9개
-  // ─────────────────────────────────────────────────────────────────────────────
-  Future<void> _loadNearest9StopsFromDB() async {
-    if (currentLocation == null) {
-      currentLocation = await _fetchCurrentLocation();
+  // ─────────────────────────────────────────
+  // 상세 문자열 안전 추출 + 동/호 파서
+  // ─────────────────────────────────────────
+
+  String _safeDetailFromRow(Map row) {
+    String pick(Object? v) => (v?.toString() ?? '').trim();
+    // 서버가 어떤 키로 내려줘도 잡히도록 후보를 넓게
+    const keys = [
+      'detail',
+      'detailAddress',
+      'detail_address',
+      'subAddress',
+      // 혹시 다른 이름으로 내려오는 케이스들(없으면 무시)
+      'dongHo',
+      'dong_ho',
+      'addrDetail',
+      'buildingInfo',
+    ];
+    for (final k in keys) {
+      if (!row.containsKey(k)) continue;
+      final v = pick(row[k]);
+      if (v.isNotEmpty && v.toLowerCase() != 'null') return v;
     }
+    return '';
+  }
+
+  String? _pickDongFromText(String? s) {
+    if (s == null) return null;
+    final t = s.trim();
+    if (t.isEmpty || t.toLowerCase() == 'null') return null;
+    final m = RegExp(r'(\d+)\s*동').firstMatch(t);
+    if (m != null) return '${m.group(1)}동';
+    if (RegExp(r'^\d+$').hasMatch(t)) return '${t}동';
+    return null;
+  }
+
+  String? _pickHoFromText(String? s) {
+    if (s == null) return null;
+    final t = s.trim();
+    if (t.isEmpty || t.toLowerCase() == 'null') return null;
+    final m = RegExp(r'(\d+)\s*호').firstMatch(t);
+    if (m != null) return '${m.group(1)}호';
+    return null;
+  }
+
+  // 행에서 dong 추출 (명시 필드 → detail → base)
+  String? _pickDongFromRow(Map row, String base, String detail) {
+    final keys = ['dong', 'buildingDong', 'building', 'aptDong', '동'];
+    for (final k in keys) {
+      final raw = row[k]?.toString().trim();
+      if (raw != null && raw.isNotEmpty && raw.toLowerCase() != 'null') {
+        if (RegExp(r'^\d+$').hasMatch(raw)) return '${raw}동';
+        final m = RegExp(r'(\d+)\s*동').firstMatch(raw);
+        if (m != null) return '${m.group(1)}동';
+        return raw;
+      }
+    }
+    return _pickDongFromText(detail) ?? _pickDongFromText(base);
+  }
+
+  Future<void> _loadNearest9StopsFromDB() async {
+    if (currentLocation == null)
+      currentLocation = await _fetchCurrentLocation();
     setState(() => _loadingStops = true);
 
     try {
       final data = await ApiService.fetchDeliverySummary();
-      debugPrint('📦 DB rows: ${data.length}');
+
       final List<_StopWithDistance> bestList = [];
       apartmentGroups.clear();
-      polylines = {}; // 새로고침 시 기존 경로 제거
+      _geoRows.clear();
+      polylines = {};
 
-      int parsedRows = 0;
       for (final row in data) {
         if (row is! Map) continue;
 
-        final base = _firstNonEmpty(row, const [
+        // base address
+        final rawBase = _firstNonEmpty(row, const [
           'shippingLocation',
           'shipping_location',
           'address',
           'baseAddress',
           'shippingAddress',
         ]);
-        final detail = _firstNonEmpty(row, const [
-          'detailAddress',
-          'detail_address',
-          'detail',
-          'subAddress',
-        ]);
+        final base = _normalizeKey(rawBase);
+
+        // 상세(동/호가 함께 들어있는 문자열일 수도 있음)
+        final detail = _safeDetailFromRow(row);
 
         if (base.isEmpty) continue;
 
+        // 좌표
         LatLng? pos = await _geocodeAddress(base);
-        if (pos == null) pos = await _geocodeByKeyword(base);
-        if (pos == null) {
-          debugPrint('⚠️ 지오코딩 실패 -> skip: "$base" (detail="$detail")');
-          continue;
-        }
+        pos ??= await _geocodeByKeyword(base);
+        if (pos == null) continue;
 
+        // 근접도
         final d = Geolocator.distanceBetween(
           currentLocation!.latitude,
           currentLocation!.longitude,
@@ -206,12 +263,33 @@ class _MapPageState extends State<MapPage> {
         );
         bestList.add(_StopWithDistance(_Stop(base, pos), d));
 
-        apartmentGroups.putIfAbsent(base, () => []);
-        apartmentGroups[base]!.add({'address': base, 'detail': detail});
-        parsedRows++;
-      }
+        // 동/호 파싱
+        final dong = _pickDongFromRow(row, base, detail);
+        final ho = _pickHoFromText(detail);
 
-      debugPrint('✅ parsedRows=$parsedRows, geocoded=${bestList.length}');
+        // 보조 그룹(문자열 키)
+        apartmentGroups.putIfAbsent(base, () => []);
+        apartmentGroups[base]!.add({
+          'address': base,
+          'detail': detail, // 원문 상세(표시용)
+          if (dong != null) 'dong': dong,
+          if (ho != null) 'ho': ho,
+        });
+
+        // 좌표 풀목록
+        _geoRows.add(
+          _GeoRow(
+            base: base,
+            pos: pos,
+            payload: {
+              'address': base,
+              'detail': detail,
+              if (dong != null) 'dong': dong,
+              if (ho != null) 'ho': ho,
+            },
+          ),
+        );
+      }
 
       bestList.sort((a, b) => a.distance.compareTo(b.distance));
       final finalStops =
@@ -227,7 +305,6 @@ class _MapPageState extends State<MapPage> {
       });
 
       await _refreshMarkers();
-      debugPrint('📍 경유지(Top9) 개수: ${_nearestStopsWithLabel.length}');
 
       if (_nearestStops.isNotEmpty && mapController != null) {
         final all = [currentLocation!, ..._nearestStops];
@@ -237,18 +314,10 @@ class _MapPageState extends State<MapPage> {
         );
       }
 
-      // 주소 불러온 직후: 방문 순서 최적화 + 카카오 경로
       if (currentLocation != null && _nearestStops.isNotEmpty) {
         await _drawOptimizedKakaoRoute(currentLocation!);
       }
-
-      if (_nearestStopsWithLabel.isEmpty && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('표시할 주소가 없습니다. (DB 응답/지오코딩 확인)')),
-        );
-      }
     } catch (e) {
-      debugPrint('❌ 주소 로드 실패: $e');
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -258,12 +327,12 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  // "null" 문자열도 무시
   String _firstNonEmpty(Map row, List<String> keys) {
     for (final k in keys) {
-      if (row.containsKey(k)) {
-        final v = row[k]?.toString().trim() ?? '';
-        if (v.isNotEmpty) return v;
-      }
+      if (!row.containsKey(k)) continue;
+      final v = (row[k]?.toString() ?? '').trim();
+      if (v.isNotEmpty && v.toLowerCase() != 'null') return v;
     }
     return '';
   }
@@ -278,21 +347,14 @@ class _MapPageState extends State<MapPage> {
         headers: {'Authorization': 'KakaoAK $_kakaoRestKey'},
       );
       if (res.statusCode == 200) {
-        final body = jsonDecode(res.body);
-        final docs = (body['documents'] as List?) ?? [];
+        final docs = (jsonDecode(res.body)['documents'] as List?) ?? [];
         if (docs.isNotEmpty) {
           final x = double.tryParse(docs[0]['x'].toString());
           final y = double.tryParse(docs[0]['y'].toString());
           if (x != null && y != null) return LatLng(y, x);
         }
-      } else {
-        debugPrint(
-          '❌ Kakao address geocode fail: ${res.statusCode} ${res.body}',
-        );
       }
-    } catch (e) {
-      debugPrint('❌ Kakao address geocode error: $e');
-    }
+    } catch (_) {}
     return null;
   }
 
@@ -306,25 +368,17 @@ class _MapPageState extends State<MapPage> {
         headers: {'Authorization': 'KakaoAK $_kakaoRestKey'},
       );
       if (res.statusCode == 200) {
-        final body = jsonDecode(res.body);
-        final docs = (body['documents'] as List?) ?? [];
+        final docs = (jsonDecode(res.body)['documents'] as List?) ?? [];
         if (docs.isNotEmpty) {
           final x = double.tryParse(docs[0]['x'].toString());
           final y = double.tryParse(docs[0]['y'].toString());
           if (x != null && y != null) return LatLng(y, x);
         }
-      } else {
-        debugPrint(
-          '❌ Kakao keyword geocode fail: ${res.statusCode} ${res.body}',
-        );
       }
-    } catch (e) {
-      debugPrint('❌ Kakao keyword geocode error: $e');
-    }
+    } catch (_) {}
     return null;
   }
 
-  // ───────── 휴리스틱 (Nearest Neighbor + 2-opt) ─────────
   double _haversine(LatLng a, LatLng b) {
     const R = 6371000.0;
     final dLat = (b.latitude - a.latitude) * (pi / 180.0);
@@ -357,7 +411,9 @@ class _MapPageState extends State<MapPage> {
   }) {
     double total(List<LatLng> r) {
       var sum = _haversine(start, r.first);
-      for (var i = 0; i < r.length - 1; i++) sum += _haversine(r[i], r[i + 1]);
+      for (var i = 0; i < r.length - 1; i++) {
+        sum += _haversine(r[i], r[i + 1]);
+      }
       return sum;
     }
 
@@ -395,36 +451,24 @@ class _MapPageState extends State<MapPage> {
     return _twoOptImprove(start, nn);
   }
 
-  // ───────── Kakao Directions → 구글맵 폴리라인 ─────────
   Future<bool> _drawKakaoDrivingRoute({
     required LatLng origin,
     required LatLng destination,
     required List<LatLng> waypoints,
   }) async {
     try {
-      String fmt(LatLng p) => '${p.longitude},${p.latitude}'; // lng,lat
-
-      final params = <String, String>{
+      String fmt(LatLng p) => '${p.longitude},${p.latitude}';
+      final uri = Uri.https('apis-navi.kakaomobility.com', '/v1/directions', {
         'origin': fmt(origin),
         'destination': fmt(destination),
         if (waypoints.isNotEmpty) 'waypoints': waypoints.map(fmt).join('|'),
         'priority': 'RECOMMEND',
-      };
-
-      final uri = Uri.https(
-        'apis-navi.kakaomobility.com',
-        '/v1/directions',
-        params,
-      );
+      });
       final res = await http.get(
         uri,
         headers: {'Authorization': 'KakaoAK $_kakaoRestKey'},
       );
-
-      if (res.statusCode != 200) {
-        debugPrint('❌ Kakao dir HTTP ${res.statusCode} ${res.body}');
-        return false;
-      }
+      if (res.statusCode != 200) return false;
 
       final data = jsonDecode(res.body);
       final routes = (data['routes'] as List?) ?? [];
@@ -435,17 +479,14 @@ class _MapPageState extends State<MapPage> {
       for (final sec in sections) {
         final roads = (sec['roads'] as List?) ?? [];
         for (final r in roads) {
-          final vertexes = (r['vertexes'] as List?)?.cast<num>() ?? [];
-          for (int i = 0; i + 1 < vertexes.length; i += 2) {
-            final lng = vertexes[i].toDouble();
-            final lat = vertexes[i + 1].toDouble();
-            coords.add(LatLng(lat, lng));
+          final v = (r['vertexes'] as List?)?.cast<num>() ?? [];
+          for (int i = 0; i + 1 < v.length; i += 2) {
+            coords.add(LatLng(v[i + 1].toDouble(), v[i].toDouble()));
           }
         }
       }
 
       if (coords.isEmpty) return false;
-
       setState(() {
         polylines = {
           Polyline(
@@ -457,13 +498,11 @@ class _MapPageState extends State<MapPage> {
         };
       });
       return true;
-    } catch (e) {
-      debugPrint('❌ Kakao dir exception: $e');
+    } catch (_) {
       return false;
     }
   }
 
-  // ───────── 현재 위치 + 경유지 → 휴리스틱 → 카카오 경로 ─────────
   Future<void> _drawOptimizedKakaoRoute(LatLng start) async {
     if (_nearestStops.isEmpty) {
       ScaffoldMessenger.of(
@@ -472,12 +511,11 @@ class _MapPageState extends State<MapPage> {
       return;
     }
 
-    var stops = _nearestStops
+    final stops = _nearestStops
         .where((p) => _haversine(start, p) > 3.0)
         .toList(growable: false);
     final orderedPoints = _optimizeStops(start, stops);
 
-    // _nearestStopsWithLabel과 매칭해 정렬된 _orderedStops 구성
     final orderedStops = <_Stop>[];
     final used = <int>{};
     for (final p in orderedPoints) {
@@ -493,12 +531,10 @@ class _MapPageState extends State<MapPage> {
       }
     }
 
-    // 방문 순서 인덱스 만들기
     final indexMap = <LatLng, int>{};
     for (int i = 0; i < orderedStops.length; i++) {
       indexMap[orderedStops[i].point] = i + 1;
     }
-
     if (mounted) {
       setState(() {
         _orderedStops = orderedStops;
@@ -517,25 +553,21 @@ class _MapPageState extends State<MapPage> {
       destination: destination,
       waypoints: waypoints,
     );
-
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('경로를 찾지 못했습니다. 좌표/키 설정을 확인하세요.')),
       );
     }
-
     await _refreshMarkers(keepStops: false);
   }
 
-  // ───────── 마커 (SVG 핀 + 숫자/라벨) ─────────
   Future<void> _refreshMarkers({bool keepStops = false}) async {
     final Set<Marker> ms = keepStops ? {...markers} : <Marker>{};
 
-    // 시작 마커: 파란 핀에 'S'
     ms.removeWhere((m) => m.markerId.value == 'start');
     if (currentLocation != null) {
       final startIcon = await NumberedMarkerIcon.startFromSvg(
-        context: context, // ★ 추가
+        context: context,
         svgAssetPath: _pinBlue,
         targetWidth: 35,
         fontScale: 0.6,
@@ -556,13 +588,12 @@ class _MapPageState extends State<MapPage> {
 
     if (!keepStops) {
       ms.removeWhere((m) => m.markerId.value.startsWith('stop_'));
-
       for (int i = 0; i < _nearestStopsWithLabel.length; i++) {
         final s = _nearestStopsWithLabel[i];
-        final n = _orderIndex[s.point] ?? (i + 1); // 방문 순서 번호 or fallback
+        final n = _orderIndex[s.point] ?? (i + 1);
 
         final icon = await NumberedMarkerIcon.numberFromSvg(
-          context: context, // ★ 추가
+          context: context,
           number: n,
           svgAssetPath: _pinRed,
           targetWidth: 35,
@@ -577,10 +608,7 @@ class _MapPageState extends State<MapPage> {
             icon: icon,
             anchor: const Offset(0.5, 1.0),
             consumeTapEvents: true,
-            onTap: () {
-              final deliveries = apartmentGroups[s.label] ?? [];
-              _showApartmentDialog(s.label, deliveries);
-            },
+            onTap: () => _showApartmentDialog(s.label, s.point),
           ),
         );
       }
@@ -590,10 +618,50 @@ class _MapPageState extends State<MapPage> {
     setState(() => markers = ms);
   }
 
-  void _showApartmentDialog(
-    String aptName,
-    List<Map<String, String>> deliveries,
-  ) {
+  // 좌표 반경으로 모아 모달에 전달
+  void _showApartmentDialog(String aptName, LatLng tappedPos) {
+    const radiusMeter = 120.0;
+    final near = <Map<String, String>>[];
+
+    for (final r in _geoRows) {
+      final dist = Geolocator.distanceBetween(
+        tappedPos.latitude,
+        tappedPos.longitude,
+        r.pos.latitude,
+        r.pos.longitude,
+      );
+      if (dist <= radiusMeter) {
+        final m = Map<String, String>.from(r.payload);
+
+        // 상세가 비어 있으면 보강 시도(다른 키까지 검사)
+        if ((m['detail'] ?? '').trim().isEmpty) {
+          final d2 = _safeDetailFromRow(r.payload);
+          if (d2.isNotEmpty) m['detail'] = d2;
+        }
+
+        // 동/호 보강
+        if ((m['dong'] ?? '').trim().isEmpty) {
+          m['dong'] =
+              _pickDongFromText(m['detail']) ??
+              _pickDongFromText(m['address']) ??
+              _pickDongFromText(aptName) ??
+              '';
+        }
+        if ((m['ho'] ?? '').trim().isEmpty) {
+          m['ho'] = _pickHoFromText(m['detail']) ?? '';
+        }
+
+        near.add(m);
+      }
+    }
+
+    // 같은 문자열 키 그룹도 합치기
+    final key = _normalizeKey(aptName);
+    final direct = apartmentGroups[key] ?? const <Map<String, String>>[];
+    for (final d in direct) {
+      if (!near.contains(d)) near.add(d);
+    }
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -601,8 +669,13 @@ class _MapPageState extends State<MapPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder:
-          (ctx) =>
-              ApartmentBottomSheet(aptName: aptName, deliveries: deliveries),
+          (ctx) => ApartmentBottomSheetGrouped(
+            aptName: aptName,
+            aptAddress: aptName,
+            deliveries: near,
+            onTapItem: (item) => debugPrint('🖱️ item: $item'),
+            onTapNavigate: (item) => debugPrint('🧭 navigate: $item'),
+          ),
     );
   }
 
@@ -679,9 +752,8 @@ class _MapPageState extends State<MapPage> {
               }
             },
             onDrawRoutePressed: () {
-              if (currentLocation != null) {
+              if (currentLocation != null)
                 _drawOptimizedKakaoRoute(currentLocation!);
-              }
             },
           ),
 
@@ -718,4 +790,12 @@ class _StopWithDistance {
   final _Stop stop;
   final double distance;
   _StopWithDistance(this.stop, this.distance);
+}
+
+// 지오 행(모달 반경 검색용)
+class _GeoRow {
+  final String base;
+  final LatLng pos;
+  final Map<String, String> payload;
+  _GeoRow({required this.base, required this.pos, required this.payload});
 }

@@ -12,20 +12,32 @@ import '../models/test_user_data.dart' as localUser;
 class ApiService {
   static const String baseUrl = 'http://116.39.208.72:26443';
 
-  // 서버 규격(한글 상태)으로 표준화
-  static const Map<String, String> _STATUS_MAP = {
+  // 서버가 허용하는 상태는 한글만: [배송대기, 배송시작, 배송완료]
+  static const Map<String, String> _STATUS_TO_KOR = {
     '배송대기': '배송대기',
     '배송시작': '배송시작',
     '배송완료': '배송완료',
-    'WAITING': '배송대기',
-    'STARTED': '배송시작',
-    'COMPLETED': '배송완료',
     '대기': '배송대기',
     '시작': '배송시작',
     '완료': '배송완료',
+    'WAITING': '배송대기',
+    'waiting': '배송대기',
+    'STARTED': '배송시작',
+    'started': '배송시작',
+    'COMPLETED': '배송완료',
+    'completed': '배송완료',
   };
   static String _normalizeStatus(String status) {
-    return _STATUS_MAP[status.trim()] ?? status.trim();
+    final s = status.trim();
+    return _STATUS_TO_KOR[s] ?? s; // 모르면 그대로
+  }
+
+  static String? _fallback(String? v) {
+    if (v == null) return null;
+    final t = v.trim();
+    if (t.isEmpty) return null;
+    if (t.toLowerCase() == 'null') return null;
+    return t;
   }
 
   // -------------------- 공통 간단 POST --------------------
@@ -93,7 +105,6 @@ class ApiService {
   }
 
   // -------------------- 배송 관련 (이미지/상태) --------------------
-  /// 배송도착 이미지 저장
   static Future<bool> sendDeliveryImage({
     required int productId,
     required String imageUrl,
@@ -125,8 +136,6 @@ class ApiService {
     }
   }
 
-  /// 배송 상태 변경 (PATCH /api/v1/driver/product/status)
-  /// Swagger 예시: productId, status, (선택) location/lat/lng/addressShort/region
   static Future<bool> updateProductStatus(
     int productId,
     String status, {
@@ -135,6 +144,7 @@ class ApiService {
     double? longitude,
     String? addressShort,
     String? region,
+    String? imageUrl,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/product/status');
     try {
@@ -142,13 +152,13 @@ class ApiService {
       final body = <String, dynamic>{
         "productId": productId,
         "status": normalized,
-        if (location != null && location.trim().isNotEmpty)
-          "location": location,
+        if (_fallback(location) != null) "location": location,
         if (latitude != null) "latitude": latitude,
         if (longitude != null) "longitude": longitude,
-        if (addressShort != null && addressShort.trim().isNotEmpty)
-          "addressShort": addressShort,
-        if (region != null && region.trim().isNotEmpty) "region": region,
+        if (_fallback(addressShort) != null) "addressShort": addressShort,
+        // region은 비우지 않도록 기본값
+        "region": _fallback(region) ?? '미지정',
+        if (_fallback(imageUrl) != null) "imageUrl": imageUrl,
       };
 
       final res = await http.patch(
@@ -176,83 +186,6 @@ class ApiService {
       return ok;
     } catch (e) {
       debugPrint('🔥 updateProductStatus 예외: $e');
-      return false;
-    }
-  }
-
-  // -------------------- 근태/건강 --------------------
-  static Future<bool> updateAttendanceStatus(String status) async {
-    final url = Uri.parse('$baseUrl/api/v1/driver/attendance');
-    try {
-      final res = await http.patch(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${localUser.UserData.token}',
-        },
-        body: jsonEncode({'status': status}),
-      );
-      return res.statusCode == 200;
-    } catch (e) {
-      debugPrint('🔥 attendance 예외: $e');
-      return false;
-    }
-  }
-
-  static Future<bool> submitHealthSurvey({
-    required String finish1,
-    required String finish2,
-    required String finish3,
-    required int step,
-    required int heartRate,
-    required String conditionStatus,
-  }) async {
-    final url = Uri.parse('$baseUrl/api/v1/driver/health/survey');
-    try {
-      final res = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${localUser.UserData.token}',
-        },
-        body: jsonEncode({
-          'finish1': finish1,
-          'finish2': finish2,
-          'finish3': finish3,
-          'step': step,
-          'heartRate': heartRate,
-          'conditionStatus': conditionStatus,
-        }),
-      );
-      return res.statusCode == 200;
-    } catch (e) {
-      debugPrint('🔥 submitHealthSurvey 예외: $e');
-      return false;
-    }
-  }
-
-  static Future<bool> sendHealthData({
-    required int step,
-    required int heartRate,
-    required String conditionStatus,
-  }) async {
-    final url = Uri.parse('$baseUrl/api/v1/driver/realtime');
-    try {
-      final res = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${localUser.UserData.token}',
-        },
-        body: jsonEncode({
-          'step': step,
-          'heartRate': heartRate,
-          'conditionStatus': conditionStatus,
-        }),
-      );
-      return res.statusCode == 200;
-    } catch (e) {
-      debugPrint('🔥 sendHealthData 예외: $e');
       return false;
     }
   }
@@ -303,16 +236,101 @@ class ApiService {
   }
 
   // -------------------- 배송 요약 --------------------
-  static Future<List<dynamic>> fetchDeliverySummary() async {
+  static Future<List<Map<String, dynamic>>> fetchDeliverySummary() async {
     final response = await get('/api/v1/driver/summary');
-    if (response['statusCode'] == 200) {
-      return response['data'];
-    } else {
+
+    // 상태코드 가드
+    final sc = response['statusCode'] ?? response['status'] ?? 500;
+    if (sc != 200) {
       throw Exception(response['message'] ?? '배송 정보를 불러올 수 없습니다.');
     }
+
+    final raw = response['data'];
+    if (raw is! List) return const [];
+
+    // 유틸
+    String _clean(Object? v) {
+      final s = (v?.toString() ?? '').trim();
+      if (s.isEmpty) return '';
+      if (s.toLowerCase() == 'null') return '';
+      return s;
+    }
+
+    String _firstNonEmpty(Map row, List<String> keys) {
+      for (final k in keys) {
+        if (row.containsKey(k)) {
+          final v = _clean(row[k]);
+          if (v.isNotEmpty) return v;
+        }
+      }
+      return '';
+    }
+
+    String? _extractDongFromText(String? s) {
+      if (s == null) return null;
+      final t = _clean(s);
+      if (t.isEmpty) return null;
+      final m = RegExp(r'(\d+)\s*동').firstMatch(t);
+      if (m != null) return '${m.group(1)}동';
+      if (RegExp(r'^\d+$').hasMatch(t)) return '${t}동';
+      return null;
+    }
+
+    final List<Map<String, dynamic>> normalized = [];
+
+    for (final e in raw) {
+      if (e is! Map) continue;
+
+      // 주소/상세주소 키 후보에서 안전 추출
+      final address = _firstNonEmpty(e, [
+        'address',
+        'shippingLocation',
+        'shipping_location',
+        'baseAddress',
+        'shippingAddress',
+      ]);
+
+      final detailAddress = _firstNonEmpty(e, [
+        'detailAddress',
+        'detail_address',
+        'detail',
+        'subAddress',
+      ]);
+
+      // ✅ dong은 detailAddress에서 우선 추출, 없으면 address에서 보조
+      final dong =
+          _extractDongFromText(detailAddress) ??
+          _extractDongFromText(address) ??
+          _extractDongFromText(_clean(e['dong'])) ??
+          _extractDongFromText(_clean(e['buildingDong'])) ??
+          _extractDongFromText(_clean(e['building']));
+
+      // ✅ 원본 행을 String 키로만 새 맵에 복사
+      final Map<String, dynamic> row = {};
+      (e as Map).forEach((k, v) => row[k.toString()] = v);
+
+      // ✅ 정규화 키 세팅
+      row['address'] = address;
+      row['detailAddress'] = detailAddress; // 원본 키 유지
+      row['detail_address'] = detailAddress; // snake_case도 유지
+      row['detail'] = detailAddress; // 🔥 모달/그룹핑이 읽는 키 (핵심)
+      if (dong != null) row['dong'] = dong;
+
+      normalized.add(row);
+    }
+
+    if (normalized.isNotEmpty) {
+      debugPrint('🧩 summary normalized keys: ${normalized.first.keys}');
+      debugPrint(
+        '🧩 sample detail/dong: '
+        'detail="${normalized.first['detail']}", dong="${normalized.first['dong']}"',
+      );
+    }
+
+    return normalized;
   }
 
-  /// 홈에서 더미 건강데이터 1회 전송용 (기존 코드 호환)
+  // (옵션) 건강 데이터 더미
   static Future<bool> createDummyHealthRecord() async {
     try {
       final step = localUser.UserData.stepCount ?? 0;
@@ -324,6 +342,150 @@ class ApiService {
         conditionStatus: cond,
       );
     } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> sendHealthData({
+    required int step,
+    required int heartRate,
+    required String conditionStatus,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/driver/realtime');
+    try {
+      final res = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${localUser.UserData.token}',
+        },
+        body: jsonEncode({
+          'step': step,
+          'heartRate': heartRate,
+          'conditionStatus': conditionStatus,
+        }),
+      );
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint('🔥 sendHealthData 예외: $e');
+      return false;
+    }
+  }
+
+  // -------------------- 근태(출근/퇴근) --------------------
+  /// 출근/퇴근 상태 업데이트
+  /// status: "출근" 또는 "퇴근"
+  static Future<bool> updateAttendanceStatus(
+    String status, {
+    double? latitude,
+    double? longitude,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/driver/attendance');
+    try {
+      final body = <String, dynamic>{
+        'status': status.trim(), // "출근" | "퇴근"
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
+      };
+
+      final res = await http.patch(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${localUser.UserData.token}',
+        },
+        body: jsonEncode(body),
+      );
+
+      Map<String, dynamic>? decoded;
+      try {
+        decoded =
+            jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
+      } catch (_) {}
+
+      final sc = decoded?['statusCode'] ?? res.statusCode;
+      final ok = sc == 0 || sc == 200;
+      if (!ok) {
+        debugPrint('❌ updateAttendanceStatus 실패: $sc, ${res.body} (req=$body)');
+      } else {
+        debugPrint('✅ updateAttendanceStatus 성공: $body');
+      }
+      return ok;
+    } catch (e) {
+      debugPrint('🔥 updateAttendanceStatus 예외: $e');
+      return false;
+    }
+  }
+
+  // -------------------- 건강 설문(자가체크) --------------------
+  /// home.dart에서 넘기는 파라미터 이름을 그대로 지원합니다.
+  /// - finish1/finish2/finish3: 체크박스/라디오 같은 완료 항목(불린/정수/문자 모두 허용)
+  /// - step: 걸음 수
+  /// - heartRate: 심박수
+  /// - conditionStatus: 컨디션(문자)
+  static Future<bool> submitHealthSurvey({
+    dynamic finish1,
+    dynamic finish2,
+    dynamic finish3,
+    int? step,
+    int? heartRate,
+    String? conditionStatus,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/driver/survey');
+
+    // any -> int(0/1) 혹은 원본 숫자/문자 유지
+    int? _to01(dynamic v) {
+      if (v == null) return null;
+      if (v is bool) return v ? 1 : 0;
+      if (v is num) return v.toInt();
+      final s = v.toString().trim().toLowerCase();
+      if (s.isEmpty || s == 'null') return null;
+      if (s == 'true' || s == 'y' || s == 'yes') return 1;
+      if (s == 'false' || s == 'n' || s == 'no') return 0;
+      final n = int.tryParse(s);
+      return n;
+    }
+
+    final Map<String, dynamic> payload = {};
+    final f1 = _to01(finish1);
+    final f2 = _to01(finish2);
+    final f3 = _to01(finish3);
+    if (f1 != null) payload['finish1'] = f1;
+    if (f2 != null) payload['finish2'] = f2;
+    if (f3 != null) payload['finish3'] = f3;
+
+    if (step != null) payload['step'] = step;
+    if (heartRate != null) payload['heartRate'] = heartRate;
+    if (conditionStatus != null && conditionStatus.trim().isNotEmpty) {
+      payload['conditionStatus'] = conditionStatus.trim();
+    }
+
+    try {
+      final res = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${localUser.UserData.token}',
+        },
+        body: jsonEncode(payload),
+      );
+
+      Map<String, dynamic>? decoded;
+      try {
+        decoded =
+            jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
+      } catch (_) {}
+
+      final sc = decoded?['statusCode'] ?? res.statusCode;
+      final ok = sc == 0 || sc == 200;
+      if (!ok) {
+        debugPrint('❌ submitHealthSurvey 실패: $sc, ${res.body} (req=$payload)');
+      } else {
+        debugPrint('✅ submitHealthSurvey 성공: $payload');
+      }
+      return ok;
+    } catch (e) {
+      debugPrint('🔥 submitHealthSurvey 예외: $e');
       return false;
     }
   }

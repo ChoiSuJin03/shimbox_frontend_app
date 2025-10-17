@@ -7,7 +7,7 @@ import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import 'package:shimbox_app/utils/navigation_helper.dart';
 import 'package:shimbox_app/pages/delivery/photo_capture_modal.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:shimbox_app/utils/firebase_uploader.dart';
+import 'package:shimbox_app/utils/firebase_uploader.dart'; // ✅ 업로드는 유지
 import '../../utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 
@@ -30,7 +30,7 @@ class DeliveryDetailPage extends StatefulWidget {
 }
 
 class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
-  // 펼침 상태를 인덱스 대신 "도로키"로 관리(정렬 변동에도 안전)
+  // 펼침 상태를 인덱스 대신 "안정 roadKey"로 관리
   String? expandedRoadKey;
 
   // 서버 원본 (UI에서 직접 사용 X)
@@ -46,7 +46,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   final _repo = DeliveryRepository();
 
   /// 도로명별 현재 선택된 동 (버튼 선택 상태)
-  /// ⚠️ road 이름만 쓰면 충돌하므로 "road#index" 키로 보관
+  /// ⚠️ road 이름만 쓰면 충돌하므로 "안정 roadKey"로 보관
   final Map<String, String?> _selectedDongByRoadKey = {};
 
   @override
@@ -73,23 +73,35 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         isLoading = false;
       });
 
-      // ✅ pid -> status 매핑
+      // ✅ pid -> status 매핑 (상품 객체의 상태를 신뢰)
       _statusByPid.clear();
       for (int a = 0; a < deliveryAreas.length; a++) {
         final units = (deliveryAreas[a]['units'] as List?) ?? [];
-        final areaStatuses =
-            (a < deliveryStatus.length) ? deliveryStatus[a] : const <int>[];
-        int flat = 0;
         for (final u in units) {
           final prods =
               ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
           for (final p in prods) {
             final pid = int.tryParse(p['productId'].toString()) ?? -1;
-            if (pid > 0) {
-              final st = (flat < areaStatuses.length) ? areaStatuses[flat] : 0;
-              _statusByPid[pid] = st;
+            if (pid <= 0) continue;
+
+            final raw =
+                (p['shippingStatus'] ?? p['status'] ?? '').toString().trim();
+
+            int st;
+            if (raw.isNotEmpty && raw.toLowerCase() != 'null') {
+              final s = raw;
+              if (s.contains('완료') || s.toUpperCase() == 'COMPLETED') {
+                st = 2;
+              } else if (s.contains('시작') || s.toUpperCase() == 'STARTED') {
+                st = 1;
+              } else {
+                st = 0;
+              }
+            } else {
+              st = 0;
             }
-            flat++;
+
+            _statusByPid[pid] = st;
           }
         }
       }
@@ -144,7 +156,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     if (full == null) return null;
     final t = full.trim();
     if (t.isEmpty) return null;
-    // 예: "서울시 성북구 정릉로 402" -> "성북구 정릉로"
     final parts = t.split(RegExp(r'\s+'));
     if (parts.length >= 3) {
       return '${parts[1]} ${parts[2]}';
@@ -161,7 +172,33 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     return t;
   }
 
+  // ---------- area 단위 집계 유틸(상품 상태 기준) ----------
+  Map<String, int> _countStatusesForAreaIndex(int aIdx) {
+    int total = 0, done = 0, inProg = 0;
+    if (aIdx < 0 || aIdx >= deliveryAreas.length) {
+      return {'total': 0, 'done': 0, 'inProg': 0};
+    }
+    final units = (deliveryAreas[aIdx]['units'] as List?) ?? [];
+    for (final u in units) {
+      final prods =
+          ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
+      for (final p in prods) {
+        final pid = int.tryParse(p['productId'].toString()) ?? -1;
+        if (pid <= 0) continue;
+        total++;
+        final st = statusByPid(pid);
+        if (st == 2) {
+          done++;
+        } else if (st == 1) {
+          inProg++;
+        }
+      }
+    }
+    return {'total': total, 'done': done, 'inProg': inProg};
+  }
+
   /// deliveryAreas -> "도로명 → 동" 그룹
+  /// ⚠️ 모든 집계는 _statusByPid(상품 상태) 기준으로 환산한다.
   List<Map<String, dynamic>> groupByRoadThenDong() {
     final Map<String, Map<String, dynamic>> roadMap = {};
 
@@ -178,18 +215,13 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         };
       });
 
-      final List<int> areaStatuses =
-          (i < deliveryStatus.length) ? deliveryStatus[i] : const <int>[];
-      final int total = (item['total'] as int? ?? 0);
-      final int done = areaStatuses.where((s) => s == 2).length;
-      final int inProg = areaStatuses.where((s) => s == 1).length;
-
+      final areaAgg = _countStatusesForAreaIndex(i);
       (roadSlot['totals'] as Map)['total'] =
-          ((roadSlot['totals'] as Map)['total'] as int) + total;
+          ((roadSlot['totals'] as Map)['total'] as int) + areaAgg['total']!;
       (roadSlot['totals'] as Map)['done'] =
-          ((roadSlot['totals'] as Map)['done'] as int) + done;
+          ((roadSlot['totals'] as Map)['done'] as int) + areaAgg['done']!;
       (roadSlot['totals'] as Map)['inProg'] =
-          ((roadSlot['totals'] as Map)['inProg'] as int) + inProg;
+          ((roadSlot['totals'] as Map)['inProg'] as int) + areaAgg['inProg']!;
 
       // 동 추출
       final units = (item['units'] as List?) ?? [];
@@ -232,18 +264,43 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   }
 
   // ---------- status 접근/갱신 ----------
-  int _getStatusByPid(int productId) => _statusByPid[productId] ?? 0;
-  void _setStatusByPidLocal(int productId, int v) {
-    _statusByPid[productId] = v;
+  int statusByPid(int productId) => _statusByPid[productId] ?? 0;
+  void setStatusByPid(int productId, int v) => _statusByPid[productId] = v;
+
+  // ---------- 동 상태 계산(로컬 pid 기준으로 일관 집계) ----------
+  Map<String, int> _calcDongProgressWithPid(List<int> areaIndexes) {
+    int total = 0;
+    int done = 0;
+    int inProg = 0;
+
+    for (final aIdx in areaIndexes) {
+      final area = _countStatusesForAreaIndex(aIdx);
+      total += area['total']!;
+      done += area['done']!;
+      inProg += area['inProg']!;
+    }
+    return {'total': total, 'done': done, 'inProg': inProg};
   }
 
-  int _safeStatusByPid(int _, int productId) => _getStatusByPid(productId);
-  void _setStatusByPid(int _, int productId, int v) =>
-      _setStatusByPidLocal(productId, v);
+  // ===== 안정 키 유틸 =====
+  // road 그룹을 대표하는 안정 키(roadName + 포함된 area 인덱스 집합)
+  String _stableRoadKey(String roadName, List<Map<String, dynamic>> dongs) {
+    final idxs = <int>[];
+    for (final d in dongs) {
+      final indices = ((d['indices'] as List?) ?? []).cast<int>();
+      idxs.addAll(indices);
+    }
+    idxs.sort();
+    final name = roadName.isEmpty ? '기타' : roadName;
+    return 'road:$name|idx:${idxs.join(',')}';
+  }
 
   String? _firstPhone(List<Map<String, dynamic>> prods) {
     for (final p in prods) {
-      final v = (p['recipientPhone'] ?? '').toString().trim();
+      final v =
+          (p['recipientPhone'] ?? p['recipientPhoneNumber'] ?? '')
+              .toString()
+              .trim();
       if (v.isNotEmpty && v.toLowerCase() != 'null') return v;
     }
     return null;
@@ -257,7 +314,27 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
             ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
         for (final prod in prods) {
           final pid = int.tryParse(prod['productId'].toString()) ?? -1;
-          if (pid > 0 && _safeStatusByPid(a, pid) == 1) {
+          if (pid > 0 && statusByPid(pid) == 1) {
+            final addr = '${prod['address']} ${prod['detailAddress']}';
+            final name = '${prod['recipientName']}';
+            return {'address': addr, 'name': name};
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /// targetPid가 아닌 다른 상품이 진행중인지 검사(사진 전송 전에 사용)
+  Map<String, String>? _findOtherActiveDeliveryInfo(int targetPid) {
+    for (int a = 0; a < deliveryAreas.length; a++) {
+      final units = (deliveryAreas[a]['units'] as List?) ?? [];
+      for (final u in units) {
+        final prods =
+            ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
+        for (final prod in prods) {
+          final pid = int.tryParse(prod['productId'].toString()) ?? -1;
+          if (pid > 0 && pid != targetPid && statusByPid(pid) == 1) {
             final addr = '${prod['address']} ${prod['detailAddress']}';
             final name = '${prod['recipientName']}';
             return {'address': addr, 'name': name};
@@ -331,9 +408,8 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                       final dongs =
                           (rg['dongs'] as List).cast<Map<String, dynamic>>();
 
-                      // 🔑 roadKey(이름 충돌/정렬 변화에 안전)
-                      final roadKey =
-                          'road:${roadName.isEmpty ? '기타' : roadName}#$ri';
+                      // 🔑 roadKey → 포함된 area 인덱스 기반
+                      final roadKey = _stableRoadKey(roadName, dongs);
 
                       // 헤더(도로명)
                       Widget roadHeader() => GestureDetector(
@@ -420,15 +496,15 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
 
                       final opened = expandedRoadKey == roadKey;
 
-                      // 현재 선택된 동 (버튼 토글용) — roadKey 별도 보관
+                      // 현재 선택된 동 (버튼 토글용) — roadKey 별도 보관(최초 1회만 세팅)
                       final dongNames =
                           dongs
                               .map((d) => (d['dong'] as String?) ?? '미지정동')
                               .toList();
-                      _selectedDongByRoadKey.putIfAbsent(
-                        roadKey,
-                        () => dongNames.isNotEmpty ? dongNames.first : null,
-                      );
+                      if (!_selectedDongByRoadKey.containsKey(roadKey)) {
+                        _selectedDongByRoadKey[roadKey] =
+                            dongNames.isNotEmpty ? dongNames.first : null;
+                      }
                       final selectedDongName = _selectedDongByRoadKey[roadKey];
 
                       // 🔑 road 단위 subtree에 Key 부여
@@ -611,35 +687,6 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
     );
   }
 
-  // ---------- 동 상태 계산(로컬 pid 기준으로 일관 집계) ----------
-  Map<String, int> _calcDongProgressWithPid(List<int> areaIndexes) {
-    int total = 0;
-    int done = 0;
-    int inProg = 0;
-
-    for (final aIdx in areaIndexes) {
-      if (aIdx < 0 || aIdx >= deliveryAreas.length) continue;
-
-      final units = (deliveryAreas[aIdx]['units'] as List?) ?? [];
-      for (final u in units) {
-        final prods =
-            ((u['products'] as List?) ?? []).cast<Map<String, dynamic>>();
-        for (final p in prods) {
-          final pid = int.tryParse(p['productId'].toString()) ?? -1;
-          if (pid <= 0) continue;
-          total += 1;
-          final st = _getStatusByPid(pid);
-          if (st == 2) {
-            done += 1;
-          } else if (st == 1) {
-            inProg += 1;
-          }
-        }
-      }
-    }
-    return {'total': total, 'done': done, 'inProg': inProg};
-  }
-
   /// 호(동/호) 섹션 + 버튼 1개(묶음 처리)
   Widget _buildGroupedDropdownContent(
     int areaIndex,
@@ -663,25 +710,26 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         final count = prods.length;
 
         final start = cursor;
-        final myIndices = List.generate(count, (k) => start + k);
+        final myIndices = List.generate(count, (k) => start + k); // 필요시 사용
         cursor += count;
 
-        // ✅ 동 이름 추출 (item 기준, 없으면 첫 상품에서 보정)
         String dong = extractDong(item);
         if ((dong.isEmpty || dong == '미지정동') && prods.isNotEmpty) {
           dong = extractDong(item, prods.first);
         }
 
-        // productId 목록
         final prodIds =
             prods
                 .map((p) => int.tryParse(p['productId'].toString()) ?? -1)
                 .where((pid) => pid > 0)
-                .toList();
+                .toList()
+              ..sort();
 
-        // 상태 계산(혼합=진행중) — 로컬 pid 기준
-        final statuses =
-            prodIds.map((pid) => _safeStatusByPid(areaIndex, pid)).toList();
+        // 🔑 유닛 subtree Key — areaIndex 포함
+        final stableUnitKey = 'unit:${areaIndex}:${prodIds.join(',')}';
+
+        // 상태 계산
+        final statuses = prodIds.map((pid) => statusByPid(pid)).toList();
         final int total = statuses.length;
         final int done = statuses.where((s) => s == 2).length;
         final int started = statuses.where((s) => s == 1).length;
@@ -691,17 +739,14 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 : ((done == 0 && started == 0) ? 0 : 1);
 
         final fullAddrLine1 = baseLine1;
-
-        // ✅ 동(dong)을 주소 라인2에 포함
         final fullAddrLine2 = [
           baseLine2,
-          (dong != '미지정동') ? dong : null, // '미지정동'은 표시 생략
+          (dong != '미지정동') ? dong : null,
           unitLabel,
         ].where((s) => s != null && s!.isNotEmpty).join(' ');
 
         final String phone = (_firstPhone(prods) ?? '01012345678');
 
-        // ✅ 내비 주소에도 동 포함
         final String navAddr = [
           baseLine1,
           baseLine2,
@@ -715,298 +760,12 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         final Color actionIconColor =
             unitAllDone ? const Color(0xFFAAAAAA) : const Color(0xFF61D5AB);
 
-        // 🔑 유닛 subtree에 Key 부여 (재사용 버그 방지)
-        final unitKey =
-            'unit:${base}|${item['building'] ?? ''}|$unitLabel|$areaIndex|$ui';
-
-        Widget buildUnitButton() {
-          if (agg == 2) {
-            return OutlinedButton(
-              onPressed: null,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFFAAAAAA),
-                disabledForegroundColor: const Color(0xFFAAAAAA),
-                side: const BorderSide(color: Color(0xFFAAAAAA)),
-                minimumSize: const Size(double.infinity, 48),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                backgroundColor: Colors.white,
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SvgPicture.asset(
-                    'assets/images/delivery/complete.svg',
-                    width: 20,
-                    height: 20,
-                    color: const Color(0xFFAAAAAA),
-                  ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    '배송 완료',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFFAAAAAA),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          } else if (agg == 1) {
-            // 진행중(사진 찍고 저장 + 완료)
-            return ElevatedButton(
-              onPressed: () async {
-                final prodsToProcess = List<Map<String, dynamic>>.from(prods);
-                if (prodsToProcess.isEmpty) return;
-
-                await showDialog(
-                  context: context,
-                  useRootNavigator: false,
-                  builder:
-                      (_) => PhotoCaptureModal(
-                        phoneNumber: phone,
-                        productId:
-                            int.tryParse(
-                              prodsToProcess.first['productId'].toString(),
-                            ) ??
-                            -1,
-                        onSend: (File image) async {
-                          // 0) Firebase 업로드
-                          final url = await FirebaseUploader.uploadImage(
-                            image,
-                            folder: 'deliveries',
-                          );
-                          if (!mounted) return;
-                          if (url == null || url.isEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Firebase 업로드 실패')),
-                            );
-                            return;
-                          }
-
-                          // 좌표
-                          final pos = await _safeGetPosition();
-                          final double? lat = pos?.latitude;
-                          final double? lng = pos?.longitude;
-
-                          bool anyFailed = false;
-                          bool anySucceeded = false;
-
-                          // 단일 product 저장/완료
-                          Future<bool> _persistImageForProduct(
-                            int pid,
-                            Map<String, dynamic> p,
-                            String url,
-                          ) async {
-                            final location =
-                                '${p['address'] ?? ''} ${p['detailAddress'] ?? ''}'
-                                    .trim();
-                            final addressShort = _makeAddressShort(
-                              p['address']?.toString(),
-                            );
-                            final region = _extractRegionFromProd(p);
-
-                            // 시작(메타) — 실패해도 계속
-                            await ApiService.updateProductStatus(
-                              pid,
-                              '배송시작',
-                              location: location,
-                              addressShort: addressShort,
-                              region: region,
-                              latitude: lat,
-                              longitude: lng,
-                            );
-
-                            // 이미지 URL 저장
-                            final saved = await ApiService.sendDeliveryImage(
-                              productId: pid,
-                              imageUrl: url,
-                            );
-                            if (!saved) return false;
-
-                            // 완료(메타)
-                            await ApiService.updateProductStatus(
-                              pid,
-                              '배송완료',
-                              location: location,
-                              addressShort: addressShort,
-                              region: region,
-                              latitude: lat,
-                              longitude: lng,
-                            );
-                            return true;
-                          }
-
-                          for (final p in prodsToProcess) {
-                            final int pid =
-                                int.tryParse(p['productId'].toString()) ?? -1;
-                            if (pid <= 0) {
-                              anyFailed = true;
-                              continue;
-                            }
-
-                            final ok = await _persistImageForProduct(
-                              pid,
-                              p,
-                              url,
-                            );
-                            if (ok) {
-                              _setStatusByPid(areaIndex, pid, 2); // 로컬 완료
-                              anySucceeded = true;
-
-                              // (선택) 고객 SMS
-                              final tel =
-                                  (p['recipientPhone'] ?? '').toString().trim();
-                              if (tel.isNotEmpty &&
-                                  tel.toLowerCase() != 'null') {
-                                final smsText = '배송이 완료되었습니다.\n사진 확인: $url';
-                                final uri = Uri.parse(
-                                  'sms:$tel?body=${Uri.encodeComponent(smsText)}',
-                                );
-                                if (await canLaunchUrl(uri)) {
-                                  await launchUrl(uri);
-                                }
-                              }
-                            } else {
-                              anyFailed = true;
-                            }
-                          }
-
-                          if (!mounted) return;
-
-                          if (anySucceeded) setState(() {}); // 버튼/색 즉시 반영
-                          if (anyFailed) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('일부 건의 이미지 저장/상태 처리에 실패했습니다.'),
-                              ),
-                            );
-                          }
-
-                          // 최신 상태 동기화
-                          await _refreshPreserveState();
-                        },
-                      ),
-                );
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF61D5AB),
-                foregroundColor: Colors.white,
-                minimumSize: const Size(double.infinity, 48),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
-              ),
-              child: const Text(
-                '배송 도착',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            );
-          } else {
-            // 대기(배송 시작)
-            return OutlinedButton(
-              onPressed: () async {
-                final active = _findActiveDeliveryInfo();
-                if (active != null) {
-                  final activeAddr = active['address'] ?? '';
-                  alarmController.addAlarm(
-                    AlarmItem(title: '배송완료를 눌렀는지 확인해주세요', subtitle: activeAddr),
-                  );
-                  await showDialog(
-                    context: context,
-                    builder:
-                        (dialogContext) => _activeWarnDialog(
-                          dialogContext,
-                          activeAddress: activeAddr,
-                        ),
-                  );
-                  return;
-                }
-
-                showDialog(
-                  context: context,
-                  barrierDismissible: false,
-                  builder:
-                      (_) => const Center(child: CircularProgressIndicator()),
-                );
-
-                bool anyFailed = false;
-                bool anySucceeded = false;
-
-                // 좌표
-                final pos = await _safeGetPosition();
-                final double? lat = pos?.latitude;
-                final double? lng = pos?.longitude;
-
-                for (final p in prods) {
-                  final int pid = int.tryParse(p['productId'].toString()) ?? -1;
-                  if (pid <= 0) {
-                    anyFailed = true;
-                    continue;
-                  }
-
-                  final location =
-                      '${p['address'] ?? ''} ${p['detailAddress'] ?? ''}'
-                          .trim();
-                  final addressShort = _makeAddressShort(
-                    p['address']?.toString(),
-                  );
-                  final region = _extractRegionFromProd(p);
-
-                  if (_safeStatusByPid(areaIndex, pid) == 0) {
-                    final ok = await ApiService.updateProductStatus(
-                      pid,
-                      '배송시작',
-                      location: location,
-                      addressShort: addressShort,
-                      region: region,
-                      latitude: lat,
-                      longitude: lng,
-                    );
-                    if (ok) {
-                      _setStatusByPid(areaIndex, pid, 1); // 로컬 즉시 반영
-                      anySucceeded = true;
-                    } else {
-                      anyFailed = true;
-                    }
-                  }
-                }
-
-                if (!mounted) return;
-                Navigator.of(context).pop();
-
-                if (anyFailed) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('일부 건의 배송 시작 처리에 실패했습니다.')),
-                  );
-                }
-                if (anySucceeded) setState(() {}); // 버튼 전환
-
-                await _refreshPreserveState(); // 서버 기준 동기화
-              },
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF61D5AB),
-                side: const BorderSide(color: Color(0xFF61D5AB)),
-                minimumSize: const Size(double.infinity, 48),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
-              ),
-              child: const Text(
-                '배송 시작',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            );
-          }
-        }
-
         return KeyedSubtree(
-          key: ValueKey(unitKey),
+          key: ValueKey(stableUnitKey),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 헤더: 주소 두 줄 + '배송 건수' + 전화/내비 + 버튼
+              // 헤더
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1074,7 +833,7 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
                 ],
               ),
               const SizedBox(height: 12),
-              buildUnitButton(),
+              _buildUnitActionButton(areaIndex, prods, agg),
               const SizedBox(height: 24),
               if (ui < units.length - 1)
                 Divider(color: Colors.grey[300], height: 1),
@@ -1084,6 +843,315 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
         );
       }),
     );
+  }
+
+  Widget _buildUnitActionButton(
+    int areaIndex,
+    List<Map<String, dynamic>> prods,
+    int agg,
+  ) {
+    if (agg == 2) {
+      return OutlinedButton(
+        onPressed: null,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: const Color(0xFFAAAAAA),
+          disabledForegroundColor: const Color(0xFFAAAAAA),
+          side: const BorderSide(color: Color(0xFFAAAAAA)),
+          minimumSize: const Size(double.infinity, 48),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(30),
+          ),
+          backgroundColor: Colors.white,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SvgPicture.asset(
+              'assets/images/delivery/complete.svg',
+              width: 20,
+              height: 20,
+              color: const Color(0xFFAAAAAA),
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              '배송 완료',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFAAAAAA),
+              ),
+            ),
+          ],
+        ),
+      );
+    } else if (agg == 1) {
+      // 진행중(사진 찍고 저장 + 완료)
+      return ElevatedButton(
+        onPressed: () async {
+          final prodsToProcess = List<Map<String, dynamic>>.from(prods);
+          if (prodsToProcess.isEmpty) return;
+
+          await showDialog(
+            context: context,
+            useRootNavigator: false,
+            builder:
+                (_) => PhotoCaptureModal(
+                  phoneNumber: _firstPhone(prodsToProcess) ?? '01012345678',
+                  productId:
+                      int.tryParse(
+                        prodsToProcess.first['productId'].toString(),
+                      ) ??
+                      -1,
+                  onSend: (File image) async {
+                    // 0) Firebase 업로드 (유지). 실패해도 '배송완료'는 진행
+                    final url = await FirebaseUploader.uploadImage(
+                      image,
+                      folder: 'deliveries',
+                    );
+                    if (!mounted) return;
+                    if (url == null || url.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Firebase 업로드 실패 — 사진 없이 완료 처리합니다.'),
+                        ),
+                      );
+                    }
+
+                    // 좌표
+                    final pos = await _safeGetPosition();
+                    final double? lat = pos?.latitude;
+                    final double? lng = pos?.longitude;
+
+                    bool anyFailed = false;
+                    bool anySucceeded = false;
+
+                    Future<bool> _completeWithBestEffort(
+                      int pid,
+                      Map<String, dynamic> p,
+                    ) async {
+                      final location =
+                          '${p['address'] ?? ''} ${p['detailAddress'] ?? ''}'
+                              .trim();
+                      final addressShort = _makeAddressShort(
+                        p['address']?.toString(),
+                      );
+                      final region = _extractRegionFromProd(p);
+
+                      // 0) 최신 상태 동기화 + 다른 진행중 건 차단
+                      await _refreshPreserveState();
+                      final otherActive = _findOtherActiveDeliveryInfo(pid);
+                      if (otherActive != null) {
+                        await showDialog(
+                          context: context,
+                          builder:
+                              (dctx) => _activeWarnDialog(
+                                dctx,
+                                activeAddress: otherActive['address'] ?? '',
+                              ),
+                        );
+                        return false;
+                      }
+
+                      // 1) STARTED (실패해도 계속)
+                      await ApiService.updateProductStatus(
+                        pid,
+                        '배송시작',
+                        location: location,
+                        addressShort: addressShort,
+                        region: region,
+                        latitude: lat,
+                        longitude: lng,
+                      );
+                      setStatusByPid(pid, 1);
+
+                      // 2) ✅ 1차: imageUrl 포함 완료 전환 시도
+                      bool okDone = await ApiService.updateProductStatus(
+                        pid,
+                        '배송완료',
+                        location: location,
+                        addressShort: addressShort,
+                        region: region,
+                        latitude: lat,
+                        longitude: lng,
+                        imageUrl: (url != null && url.isNotEmpty) ? url : null,
+                      );
+
+                      // 3) ❗만약 서버가 imageUrl로 400/실패를 응답하면 URL 없이 재시도
+                      if (!okDone) {
+                        okDone = await ApiService.updateProductStatus(
+                          pid,
+                          '배송완료',
+                          location: location,
+                          addressShort: addressShort,
+                          region: region,
+                          latitude: lat,
+                          longitude: lng,
+                          // imageUrl 제거
+                        );
+                      }
+
+                      if (!okDone) return false;
+                      setStatusByPid(pid, 2);
+                      return true;
+                    }
+
+                    for (final p in prodsToProcess) {
+                      final int pid =
+                          int.tryParse(p['productId'].toString()) ?? -1;
+                      if (pid <= 0) {
+                        anyFailed = true;
+                        continue;
+                      }
+
+                      final ok = await _completeWithBestEffort(pid, p);
+                      if (ok) {
+                        setStatusByPid(pid, 2); // 로컬 완료
+                        anySucceeded = true;
+
+                        // (옵션) 고객 SMS — 업로드 성공 시에만 링크 포함
+                        final tel =
+                            (p['recipientPhone'] ??
+                                    p['recipientPhoneNumber'] ??
+                                    '')
+                                .toString()
+                                .trim();
+                        if (tel.isNotEmpty && tel.toLowerCase() != 'null') {
+                          final smsText =
+                              (url != null && url.isNotEmpty)
+                                  ? '배송이 완료되었습니다.\n사진 확인: $url'
+                                  : '배송이 완료되었습니다.';
+                          final uri = Uri.parse(
+                            'sms:$tel?body=${Uri.encodeComponent(smsText)}',
+                          );
+                          if (await canLaunchUrl(uri)) {
+                            await launchUrl(uri);
+                          }
+                        }
+                      } else {
+                        anyFailed = true;
+                      }
+                    }
+
+                    if (!mounted) return;
+
+                    if (anySucceeded) setState(() {}); // 버튼/색 즉시 반영
+                    if (anyFailed) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('일부 건의 이미지/상태 처리에 실패했습니다.'),
+                        ),
+                      );
+                    }
+
+                    // 최신 상태 동기화
+                    await _refreshPreserveState();
+                  },
+                ),
+          );
+        },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF61D5AB),
+          foregroundColor: Colors.white,
+          minimumSize: const Size(double.infinity, 48),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(30),
+          ),
+        ),
+        child: const Text(
+          '배송 도착',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      );
+    } else {
+      // 대기(배송 시작)
+      return OutlinedButton(
+        onPressed: () async {
+          final active = _findActiveDeliveryInfo();
+          if (active != null) {
+            final activeAddr = active['address'] ?? '';
+            alarmController.addAlarm(
+              AlarmItem(title: '배송완료를 눌렀는지 확인해주세요', subtitle: activeAddr),
+            );
+            await showDialog(
+              context: context,
+              builder:
+                  (dialogContext) => _activeWarnDialog(
+                    dialogContext,
+                    activeAddress: activeAddr,
+                  ),
+            );
+            return;
+          }
+
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => const Center(child: CircularProgressIndicator()),
+          );
+
+          bool anyFailed = false;
+          bool anySucceeded = false;
+
+          final pos = await _safeGetPosition();
+          final double? lat = pos?.latitude;
+          final double? lng = pos?.longitude;
+
+          for (final p in prods) {
+            final int pid = int.tryParse(p['productId'].toString()) ?? -1;
+            if (pid <= 0) {
+              anyFailed = true;
+              continue;
+            }
+
+            final location =
+                '${p['address'] ?? ''} ${p['detailAddress'] ?? ''}'.trim();
+            final addressShort = _makeAddressShort(p['address']?.toString());
+            final region = _extractRegionFromProd(p);
+
+            if (statusByPid(pid) == 0) {
+              final ok = await ApiService.updateProductStatus(
+                pid,
+                '배송시작', // 서버로는 STARTED
+                location: location,
+                addressShort: addressShort,
+                region: region,
+                latitude: lat,
+                longitude: lng,
+              );
+              if (ok) {
+                setStatusByPid(pid, 1); // 로컬 즉시 반영
+                anySucceeded = true;
+              } else {
+                anyFailed = true;
+              }
+            }
+          }
+
+          if (!mounted) return;
+          Navigator.of(context).pop();
+
+          if (anyFailed) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('일부 건의 배송 시작 처리에 실패했습니다.')),
+            );
+          }
+          if (anySucceeded) setState(() {}); // 버튼 전환
+
+          await _refreshPreserveState(); // 서버 기준 동기화
+        },
+        style: OutlinedButton.styleFrom(
+          foregroundColor: const Color(0xFF61D5AB),
+          side: const BorderSide(color: Color(0xFF61D5AB)),
+          minimumSize: const Size(double.infinity, 48),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(30),
+          ),
+        ),
+        child: const Text(
+          '배송 시작',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      );
+    }
   }
 
   // 진행 중 경고 다이얼로그
@@ -1227,6 +1295,4 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
       return null;
     }
   }
-
-  // ====== 추가 끝 ======
 }

@@ -2,8 +2,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import '../../utils/api_service.dart';
-import 'package:shimbox_app/utils/firebase_uploader.dart';
 
 class PhotoCaptureModal extends StatefulWidget {
   final String phoneNumber;
@@ -75,11 +73,10 @@ class _PhotoCaptureModalState extends State<PhotoCaptureModal> {
                       GestureDetector(
                         onTap: () async {
                           if (_image != null) {
-                            widget.onSend(_image!); // ✅ 이 부분만 호출하고 나머지 제거
+                            widget.onSend(_image!); // 처리 로직은 부모에서 수행
                             Navigator.of(context, rootNavigator: false).pop();
                           }
                         },
-
                         child: Container(
                           width: double.infinity,
                           padding: const EdgeInsets.symmetric(vertical: 14),
@@ -109,7 +106,6 @@ class _PhotoCaptureModalState extends State<PhotoCaptureModal> {
           child: GestureDetector(
             onTap: () async => await _pickImage(),
             child: MediaQuery(
-              // ✅ 시스템 글꼴 확대 무시(원하면 삭제)
               data: MediaQuery.of(
                 context,
               ).copyWith(textScaler: const TextScaler.linear(1.0)),
@@ -135,7 +131,7 @@ class _PhotoCaptureModalState extends State<PhotoCaptureModal> {
                       '다시찍기',
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 14, // 고정 폰트 크기
+                        fontSize: 14,
                         fontWeight: FontWeight.w700,
                         decoration: TextDecoration.none,
                       ),
@@ -143,7 +139,7 @@ class _PhotoCaptureModalState extends State<PhotoCaptureModal> {
                     const SizedBox(width: 6),
                     SvgPicture.asset(
                       'assets/images/delivery/re.svg',
-                      width: 18, // 아이콘도 살짝 축
+                      width: 18,
                       height: 18,
                       color: Colors.white,
                     ),
