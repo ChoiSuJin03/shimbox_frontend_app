@@ -423,48 +423,26 @@ class ApiService {
   /// - step: 걸음 수
   /// - heartRate: 심박수
   /// - conditionStatus: 컨디션(문자)
+  // -------------------- 건강 설문(퇴근 전 설문) --------------------
   static Future<bool> submitHealthSurvey({
-    dynamic finish1,
-    dynamic finish2,
-    dynamic finish3,
-    int? step,
-    int? heartRate,
-    String? conditionStatus,
+    required String finish1, // ex) '적었다' | '비슷했다' | '많았다'
+    required String finish2, // ex) '전혀 아니다' | '약간 그렇다' | '매우 그렇다'
+    required String finish3, // ex) '적게' | '평소대로' | '더 많이'
   }) async {
-    final url = Uri.parse('$baseUrl/api/v1/driver/survey');
+    final url = Uri.parse('$baseUrl/api/v1/driver/health/survey');
 
-    // any -> int(0/1) 혹은 원본 숫자/문자 유지
-    int? _to01(dynamic v) {
-      if (v == null) return null;
-      if (v is bool) return v ? 1 : 0;
-      if (v is num) return v.toInt();
-      final s = v.toString().trim().toLowerCase();
-      if (s.isEmpty || s == 'null') return null;
-      if (s == 'true' || s == 'y' || s == 'yes') return 1;
-      if (s == 'false' || s == 'n' || s == 'no') return 0;
-      final n = int.tryParse(s);
-      return n;
-    }
-
-    final Map<String, dynamic> payload = {};
-    final f1 = _to01(finish1);
-    final f2 = _to01(finish2);
-    final f3 = _to01(finish3);
-    if (f1 != null) payload['finish1'] = f1;
-    if (f2 != null) payload['finish2'] = f2;
-    if (f3 != null) payload['finish3'] = f3;
-
-    if (step != null) payload['step'] = step;
-    if (heartRate != null) payload['heartRate'] = heartRate;
-    if (conditionStatus != null && conditionStatus.trim().isNotEmpty) {
-      payload['conditionStatus'] = conditionStatus.trim();
-    }
+    final payload = <String, dynamic>{
+      'finish1': finish1.trim(),
+      'finish2': finish2.trim(),
+      'finish3': finish3.trim(),
+    };
 
     try {
       final res = await http.post(
         url,
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Accept': 'application/json',
           'Authorization': 'Bearer ${localUser.UserData.token}',
         },
         body: jsonEncode(payload),
@@ -476,14 +454,31 @@ class ApiService {
             jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
       } catch (_) {}
 
-      final sc = decoded?['statusCode'] ?? res.statusCode;
-      final ok = sc == 0 || sc == 200;
-      if (!ok) {
-        debugPrint('❌ submitHealthSurvey 실패: $sc, ${res.body} (req=$payload)');
-      } else {
-        debugPrint('✅ submitHealthSurvey 성공: $payload');
+      // HTTP 레벨 먼저 체크
+      if (res.statusCode != 200) {
+        debugPrint(
+          '❌ submitHealthSurvey HTTP 실패: ${res.statusCode} ${res.body}',
+        );
+        return false;
       }
-      return ok;
+
+      // 비즈니스 레벨(statusCode) 체크
+      final scRaw = decoded?['statusCode'];
+      final sc =
+          (scRaw is num)
+              ? scRaw.toInt()
+              : int.tryParse(scRaw?.toString() ?? '');
+      final ok = (sc == null && res.statusCode == 200) || sc == 0 || sc == 200;
+
+      if (!ok) {
+        debugPrint(
+          '❌ submitHealthSurvey 실패(statusCode=$sc): ${res.body} (req=$payload)',
+        );
+        return false;
+      }
+
+      debugPrint('✅ submitHealthSurvey 성공: $payload');
+      return true;
     } catch (e) {
       debugPrint('🔥 submitHealthSurvey 예외: $e');
       return false;

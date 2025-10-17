@@ -671,29 +671,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         ),
-
         if (showSurvey)
           SurveyModule(
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
-              final dummySuccess = await ApiService.createDummyHealthRecord();
-              if (!dummySuccess) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(const SnackBar(content: Text('건강 데이터 생성 실패')));
-                }
-                return;
-              }
+              // (선택) 더미 건강데이터는 실패해도 설문/퇴근은 진행
+              // final dummySuccess = await ApiService.createDummyHealthRecord();
+              // if (!dummySuccess && context.mounted) {
+              //   ScaffoldMessenger.of(context).showSnackBar(
+              //     const SnackBar(content: Text('건강 데이터 생성 실패 (설문은 계속 진행)')),
+              //   );
+              // }
 
+              // ✅ submitHealthSurvey는 문자열 3개만!
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
                 finish2: finish2,
                 finish3: finish3,
-                step: UserData.stepCount ?? 0,
-                heartRate: UserData.heartRate ?? 0,
-                conditionStatus: UserData.conditionStatus ?? '미정',
               );
 
               if (!surveySuccess) {
@@ -705,9 +700,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 return;
               }
 
+              // ✅ 시간 포맷 수정 (toStringAsFixed 제거)
               final now = DateTime.now();
               final time =
-                  '${now.hour.toString().padLeft(2, '0')}:${now.minute.toStringAsFixed(0).padLeft(2, '0')}';
+                  '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
               final offSuccess = await ApiService.updateAttendanceStatus("퇴근");
               if (!offSuccess) {
@@ -732,9 +728,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               bottomController.changeBottomNav(0);
               _pageController.jumpToPage(0);
             },
-            onClose: (_) {
-              setState(() => showSurvey = false);
-            },
+            onClose: (_) => setState(() => showSurvey = false),
           ),
       ],
     );
