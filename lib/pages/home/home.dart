@@ -1,4 +1,3 @@
-// lib/pages/home/home_page.dart
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'survey_module.dart';
@@ -54,6 +53,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 앱이 백그라운드 -> 포그라운드(Resumed)로 돌아왔고 홈이 보이는 상태라면 1회 전송 예약
     if (state == AppLifecycleState.resumed) {
       LocationSocketService.instance.markHomeEntered();
+      fetchDeliverySummary(); // ✅ 복귀 시 요약 갱신
     }
   }
 
@@ -62,6 +62,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.didChangeDependencies();
     // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버 (빌드 컨텍스트 확보 후)
     LocationSocketService.instance.markHomeEntered();
+    fetchDeliverySummary(); // ✅ 화면 다시 보일 때도 갱신
   }
 
   @override
@@ -170,10 +171,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return const Color(0xFF747474);
   }
 
+  // ✅ 진행중 판정 완화: 완료가 전체보다 적으면 진행중(완료 0이어도 시작됐다고 가정하여 초록)
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    return total > 0 && done > 0 && done < total;
+    return total > 0 && done < total;
   }
 
   bool _isAreaCompleted(Map<String, dynamic> area) {
@@ -328,7 +330,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                               fontSize: 13,
                                             ),
                                             softWrap: true, // ✅ 전체 줄바꿈 허용
-                                            // maxLines/overflow 없음 → 끝까지 표시
                                           );
                                         }),
                                       ),
@@ -657,7 +658,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
                               if (changed == true) {
-                                await fetchDeliverySummary();
+                                await fetchDeliverySummary(); // ✅ 상세 변경 반영
                               }
                             },
                           ),

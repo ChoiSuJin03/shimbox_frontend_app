@@ -49,6 +49,9 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
   /// ⚠️ road 이름만 쓰면 충돌하므로 "안정 roadKey"로 보관
   final Map<String, String?> _selectedDongByRoadKey = {};
 
+  // ✅ 상세에서 상태가 하나라도 바뀌었는지 추적 → 뒤로갈 때 Home에 전달
+  bool _mutated = false;
+
   @override
   void initState() {
     super.initState();
@@ -265,7 +268,10 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
 
   // ---------- status 접근/갱신 ----------
   int statusByPid(int productId) => _statusByPid[productId] ?? 0;
-  void setStatusByPid(int productId, int v) => _statusByPid[productId] = v;
+  void setStatusByPid(int productId, int v) {
+    _statusByPid[productId] = v;
+    _mutated = true; // ✅ 상태가 바뀌면 변경됨 플래그 세팅
+  }
 
   // ---------- 동 상태 계산(로컬 pid 기준으로 일관 집계) ----------
   Map<String, int> _calcDongProgressWithPid(List<int> areaIndexes) {
@@ -357,333 +363,353 @@ class _DeliveryDetailPageState extends State<DeliveryDetailPage> {
 
     final roadGroups = groupByRoadThenDong();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          '${widget.area['name']} 배달 건',
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
-        elevation: 0,
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 37),
-          child: Center(
-            child: GestureDetector(
-              onTap: () => Get.find<BottomNavController>().changeBottomNav(0),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: SvgPicture.asset(
-                  'assets/images/home/back.svg',
-                  fit: BoxFit.contain,
+    return WillPopScope(
+      onWillPop: () async {
+        // ✅ 뒤로가기(제스처 포함) 시 변경 여부를 결과로 돌려서 Home이 요약 갱신
+        Get.back(result: _mutated);
+        return false;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(
+            '${widget.area['name']} 배달 건',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          centerTitle: true,
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black,
+          elevation: 0,
+          leading: Padding(
+            padding: const EdgeInsets.only(left: 37),
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  // ✅ 단순 탭 전환 대신 pop + result 로 Home에 알림
+                  Get.back(result: _mutated);
+                },
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: SvgPicture.asset(
+                    'assets/images/home/back.svg',
+                    fit: BoxFit.contain,
+                  ),
                 ),
               ),
             ),
           ),
         ),
-      ),
-      body:
-          isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : RefreshIndicator(
-                onRefresh: fetchData,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 36,
-                    vertical: 16,
-                  ),
-                  child: ListView.builder(
-                    itemCount: roadGroups.length,
-                    itemBuilder: (context, ri) {
-                      final rg = roadGroups[ri];
-                      final roadName = (rg['road'] as String?) ?? '';
-                      final totals = (rg['totals'] as Map);
-                      final int total = (totals['total'] as int?) ?? 0;
-                      final int done = (totals['done'] as int?) ?? 0;
-                      final int inProg = (totals['inProg'] as int?) ?? 0;
-                      final int progressed = done + inProg;
+        body:
+            isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                  onRefresh: fetchData,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 36,
+                      vertical: 16,
+                    ),
+                    child: ListView.builder(
+                      itemCount: roadGroups.length,
+                      itemBuilder: (context, ri) {
+                        final rg = roadGroups[ri];
+                        final roadName = (rg['road'] as String?) ?? '';
+                        final totals = (rg['totals'] as Map);
+                        final int total = (totals['total'] as int?) ?? 0;
+                        final int done = (totals['done'] as int?) ?? 0;
+                        final int inProg = (totals['inProg'] as int?) ?? 0;
+                        final int progressed = done + inProg;
 
-                      final dongs =
-                          (rg['dongs'] as List).cast<Map<String, dynamic>>();
+                        final dongs =
+                            (rg['dongs'] as List).cast<Map<String, dynamic>>();
 
-                      // 🔑 roadKey → 포함된 area 인덱스 기반
-                      final roadKey = _stableRoadKey(roadName, dongs);
+                        // 🔑 roadKey → 포함된 area 인덱스 기반
+                        final roadKey = _stableRoadKey(roadName, dongs);
 
-                      // 헤더(도로명)
-                      Widget roadHeader() => GestureDetector(
-                        onTap:
-                            () => setState(() {
-                              expandedRoadKey =
-                                  (expandedRoadKey == roadKey) ? null : roadKey;
-                            }),
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                width: 48,
-                                height: 48,
-                                decoration: BoxDecoration(
-                                  color:
-                                      progressed == 0
-                                          ? const Color(0xFFF4F4F4)
-                                          : const Color(0xFF61D5AB),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Center(
-                                  child: SvgPicture.asset(
-                                    'assets/images/home/marker.svg',
-                                    width: 24,
-                                    height: 24,
+                        // 헤더(도로명)
+                        Widget roadHeader() => GestureDetector(
+                          onTap:
+                              () => setState(() {
+                                expandedRoadKey =
+                                    (expandedRoadKey == roadKey)
+                                        ? null
+                                        : roadKey;
+                              }),
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  width: 48,
+                                  height: 48,
+                                  decoration: BoxDecoration(
                                     color:
                                         progressed == 0
-                                            ? const Color(0xFF61D5AB)
-                                            : Colors.white,
+                                            ? const Color(0xFFF4F4F4)
+                                            : const Color(0xFF61D5AB),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Center(
+                                    child: SvgPicture.asset(
+                                      'assets/images/home/marker.svg',
+                                      width: 24,
+                                      height: 24,
+                                      color:
+                                          progressed == 0
+                                              ? const Color(0xFF61D5AB)
+                                              : Colors.white,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      roadName.isEmpty ? '기타' : roadName,
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 16,
-                                        color:
-                                            (progressed == total &&
-                                                    total > 0 &&
-                                                    inProg == 0)
-                                                ? const Color(0xFF555555)
-                                                : Colors.black87,
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        roadName.isEmpty ? '기타' : roadName,
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 16,
+                                          color:
+                                              (progressed == total &&
+                                                      total > 0 &&
+                                                      inProg == 0)
+                                                  ? const Color(0xFF555555)
+                                                  : Colors.black87,
+                                        ),
                                       ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      (progressed == total &&
-                                              total > 0 &&
-                                              inProg == 0)
-                                          ? '$total / $total건 완료'
-                                          : '$progressed / $total건 진행 중',
-                                      style: TextStyle(
-                                        color:
-                                            (progressed == total &&
-                                                    total > 0 &&
-                                                    inProg == 0)
-                                                ? const Color(0xFF888888)
-                                                : const Color(0xFF2D5FFF),
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              Icon(
-                                expandedRoadKey == roadKey
-                                    ? Icons.keyboard_arrow_up_rounded
-                                    : Icons.keyboard_arrow_down_rounded,
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-
-                      final opened = expandedRoadKey == roadKey;
-
-                      // 현재 선택된 동 (버튼 토글용) — roadKey 별도 보관(최초 1회만 세팅)
-                      final dongNames =
-                          dongs
-                              .map((d) => (d['dong'] as String?) ?? '미지정동')
-                              .toList();
-                      if (!_selectedDongByRoadKey.containsKey(roadKey)) {
-                        _selectedDongByRoadKey[roadKey] =
-                            dongNames.isNotEmpty ? dongNames.first : null;
-                      }
-                      final selectedDongName = _selectedDongByRoadKey[roadKey];
-
-                      // 🔑 road 단위 subtree에 Key 부여
-                      return KeyedSubtree(
-                        key: ValueKey(roadKey),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            roadHeader(),
-                            if (opened) ...[
-                              // 동 버튼(칩)들
-                              Padding(
-                                padding: const EdgeInsets.only(
-                                  top: 8,
-                                  bottom: 10,
-                                ),
-                                child: Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    for (final d in dongs) ...[
-                                      Builder(
-                                        builder: (_) {
-                                          final name =
-                                              (d['dong'] as String?) ?? '미지정동';
-                                          final areaIdxs =
-                                              ((d['indices'] as List?) ?? [])
-                                                  .cast<int>();
-
-                                          // ✅ 집계는 로컬 상태(_statusByPid) 기준
-                                          final prog = _calcDongProgressWithPid(
-                                            areaIdxs,
-                                          );
-                                          final t = (prog['total'] ?? 0);
-                                          final dn = (prog['done'] ?? 0);
-                                          final ip = (prog['inProg'] ?? 0);
-
-                                          final bool isDone =
-                                              (t > 0 && dn == t);
-                                          final bool isIdle =
-                                              (dn == 0 && ip == 0);
-                                          final bool isInProg =
-                                              !isDone && !isIdle;
-
-                                          final bg =
-                                              isDone
-                                                  ? colorDoneBg
-                                                  : (isInProg
-                                                      ? colorProgBg
-                                                      : colorIdleBg);
-                                          final fg =
-                                              isDone
-                                                  ? colorDoneFg
-                                                  : (isInProg
-                                                      ? colorProgFg
-                                                      : colorIdleFg);
-
-                                          final bool isSelected =
-                                              (selectedDongName == name);
-
-                                          return GestureDetector(
-                                            onTap: () {
-                                              setState(() {
-                                                _selectedDongByRoadKey[roadKey] =
-                                                    name;
-                                              });
-                                            },
-                                            child: AnimatedContainer(
-                                              duration: const Duration(
-                                                milliseconds: 150,
-                                              ),
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 11,
-                                                    vertical: 5,
-                                                  ),
-                                              decoration: BoxDecoration(
-                                                color: bg,
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                border: Border.all(
-                                                  color:
-                                                      isSelected
-                                                          ? const Color(
-                                                            0xFF2D5FFF,
-                                                          )
-                                                          : Colors.transparent,
-                                                  width: isSelected ? 1.2 : 0,
-                                                ),
-                                              ),
-                                              child: Text(
-                                                name,
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.w700,
-                                                  fontSize: 13,
-                                                  color: fg,
-                                                ),
-                                              ),
-                                            ),
-                                          );
-                                        },
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        (progressed == total &&
+                                                total > 0 &&
+                                                inProg == 0)
+                                            ? '$total / $total건 완료'
+                                            : '$progressed / $total건 진행 중',
+                                        style: TextStyle(
+                                          color:
+                                              (progressed == total &&
+                                                      total > 0 &&
+                                                      inProg == 0)
+                                                  ? const Color(0xFF888888)
+                                                  : const Color(0xFF2D5FFF),
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                        ),
                                       ),
                                     ],
-                                  ],
+                                  ),
                                 ),
-                              ),
-
-                              // 선택된 동의 주소 목록
-                              if (selectedDongName != null) ...[
-                                Builder(
-                                  builder: (_) {
-                                    final Map<String, dynamic>?
-                                    selectedDongBlock = dongs.firstWhere(
-                                      (d) =>
-                                          ((d['dong'] as String?) ?? '미지정동') ==
-                                          selectedDongName,
-                                      orElse: () => <String, dynamic>{},
-                                    );
-                                    if (selectedDongBlock == null ||
-                                        (selectedDongBlock['items'] as List?) ==
-                                            null ||
-                                        (selectedDongBlock['items'] as List)
-                                            .isEmpty) {
-                                      return const Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          vertical: 8,
-                                        ),
-                                        child: Text(
-                                          '해당 동에 표시할 항목이 없습니다.',
-                                          style: TextStyle(
-                                            color: Colors.grey,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      );
-                                    }
-
-                                    final items =
-                                        ((selectedDongBlock['items'] as List))
-                                            .cast<Map<String, dynamic>>();
-                                    final indices =
-                                        ((selectedDongBlock['indices'] as List))
-                                            .cast<int>();
-
-                                    return Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        for (
-                                          int k = 0;
-                                          k < items.length;
-                                          k++
-                                        ) ...[
-                                          _buildGroupedDropdownContent(
-                                            indices[k],
-                                            items[k],
-                                          ),
-                                          const SizedBox(height: 8),
-                                          if (k < items.length - 1)
-                                            Divider(
-                                              color: Colors.grey[300],
-                                              height: 1,
-                                            ),
-                                          const SizedBox(height: 8),
-                                        ],
-                                      ],
-                                    );
-                                  },
+                                Icon(
+                                  expandedRoadKey == roadKey
+                                      ? Icons.keyboard_arrow_up_rounded
+                                      : Icons.keyboard_arrow_down_rounded,
                                 ),
                               ],
+                            ),
+                          ),
+                        );
+
+                        final opened = expandedRoadKey == roadKey;
+
+                        // 현재 선택된 동 (버튼 토글용) — roadKey 별도 보관(최초 1회만 세팅)
+                        final dongNames =
+                            dongs
+                                .map((d) => (d['dong'] as String?) ?? '미지정동')
+                                .toList();
+                        if (!_selectedDongByRoadKey.containsKey(roadKey)) {
+                          _selectedDongByRoadKey[roadKey] =
+                              dongNames.isNotEmpty ? dongNames.first : null;
+                        }
+                        final selectedDongName =
+                            _selectedDongByRoadKey[roadKey];
+
+                        // 🔑 road 단위 subtree에 Key 부여
+                        return KeyedSubtree(
+                          key: ValueKey(roadKey),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              roadHeader(),
+                              if (opened) ...[
+                                // 동 버튼(칩)들
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    top: 8,
+                                    bottom: 10,
+                                  ),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      for (final d in dongs) ...[
+                                        Builder(
+                                          builder: (_) {
+                                            final name =
+                                                (d['dong'] as String?) ??
+                                                '미지정동';
+                                            final areaIdxs =
+                                                ((d['indices'] as List?) ?? [])
+                                                    .cast<int>();
+
+                                            // ✅ 집계는 로컬 상태(_statusByPid) 기준
+                                            final prog =
+                                                _calcDongProgressWithPid(
+                                                  areaIdxs,
+                                                );
+                                            final t = (prog['total'] ?? 0);
+                                            final dn = (prog['done'] ?? 0);
+                                            final ip = (prog['inProg'] ?? 0);
+
+                                            final bool isDone =
+                                                (t > 0 && dn == t);
+                                            final bool isIdle =
+                                                (dn == 0 && ip == 0);
+                                            final bool isInProg =
+                                                !isDone && !isIdle;
+
+                                            final bg =
+                                                isDone
+                                                    ? colorDoneBg
+                                                    : (isInProg
+                                                        ? colorProgBg
+                                                        : colorIdleBg);
+                                            final fg =
+                                                isDone
+                                                    ? colorDoneFg
+                                                    : (isInProg
+                                                        ? colorProgFg
+                                                        : colorIdleFg);
+
+                                            final bool isSelected =
+                                                (selectedDongName == name);
+
+                                            return GestureDetector(
+                                              onTap: () {
+                                                setState(() {
+                                                  _selectedDongByRoadKey[roadKey] =
+                                                      name;
+                                                });
+                                              },
+                                              child: AnimatedContainer(
+                                                duration: const Duration(
+                                                  milliseconds: 150,
+                                                ),
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 11,
+                                                      vertical: 5,
+                                                    ),
+                                                decoration: BoxDecoration(
+                                                  color: bg,
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  border: Border.all(
+                                                    color:
+                                                        isSelected
+                                                            ? const Color(
+                                                              0xFF2D5FFF,
+                                                            )
+                                                            : Colors
+                                                                .transparent,
+                                                    width: isSelected ? 1.2 : 0,
+                                                  ),
+                                                ),
+                                                child: Text(
+                                                  name,
+                                                  style: TextStyle(
+                                                    fontWeight: FontWeight.w700,
+                                                    fontSize: 13,
+                                                    color: fg,
+                                                  ),
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+
+                                // 선택된 동의 주소 목록
+                                if (selectedDongName != null) ...[
+                                  Builder(
+                                    builder: (_) {
+                                      final Map<String, dynamic>?
+                                      selectedDongBlock = dongs.firstWhere(
+                                        (d) =>
+                                            ((d['dong'] as String?) ??
+                                                '미지정동') ==
+                                            selectedDongName,
+                                        orElse: () => <String, dynamic>{},
+                                      );
+                                      if (selectedDongBlock == null ||
+                                          (selectedDongBlock['items']
+                                                  as List?) ==
+                                              null ||
+                                          (selectedDongBlock['items'] as List)
+                                              .isEmpty) {
+                                        return const Padding(
+                                          padding: EdgeInsets.symmetric(
+                                            vertical: 8,
+                                          ),
+                                          child: Text(
+                                            '해당 동에 표시할 항목이 없습니다.',
+                                            style: TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        );
+                                      }
+
+                                      final items =
+                                          ((selectedDongBlock['items'] as List))
+                                              .cast<Map<String, dynamic>>();
+                                      final indices =
+                                          ((selectedDongBlock['indices']
+                                                  as List))
+                                              .cast<int>();
+
+                                      return Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          for (
+                                            int k = 0;
+                                            k < items.length;
+                                            k++
+                                          ) ...[
+                                            _buildGroupedDropdownContent(
+                                              indices[k],
+                                              items[k],
+                                            ),
+                                            const SizedBox(height: 8),
+                                            if (k < items.length - 1)
+                                              Divider(
+                                                color: Colors.grey[300],
+                                                height: 1,
+                                              ),
+                                            const SizedBox(height: 8),
+                                          ],
+                                        ],
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ],
+                              const SizedBox(height: 12),
                             ],
-                            const SizedBox(height: 12),
-                          ],
-                        ),
-                      );
-                    },
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
-              ),
+      ),
     );
   }
 
