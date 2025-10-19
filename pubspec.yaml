@@ -31,6 +31,8 @@ dependencies:
   flutter:
     sdk: flutter
 
+  web_socket_channel: ^2.4.0
+
   # db
   sqflite: ^2.3.0
   path: ^1.8.0
@@ -38,8 +40,9 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   get: ^4.6.5
-  flutter_svg: ^2.0.7
+  flutter_svg: ^2.0.9
   intl: ^0.20.2
+  vector_graphics: ^1.1.9
 
   # 추가
   permission_handler: ^12.0.0+1
@@ -118,6 +121,8 @@ flutter:
     - assets/images/map/
     - assets/map.html
     - assets/daum_postcode.html
+    - assets/images/map/pin_red.svg
+    - assets/images/map/pin_blue.svg
 
   # To add assets to your application, add an assets section, like this:
   # assets:

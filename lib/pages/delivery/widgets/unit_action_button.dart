@@ -1,11 +1,9 @@
-/// - 동/호 섹션 하단의 **액션 버튼**만 담당(배송 시작/도착/완료).
-
 import 'package:flutter/material.dart';
 
 class UnitActionButton extends StatelessWidget {
   final int aggregate; // 0(대기)/1(진행)/2(완료)
-  final VoidCallback onStart;
-  final Future<void> Function() onArrive;
+  final VoidCallback onStart; // 배송 시작
+  final Future<void> Function() onArrive; // 배송 도착
 
   const UnitActionButton({
     super.key,

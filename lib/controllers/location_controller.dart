@@ -6,31 +6,27 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
+import 'package:shimbox_app/services/location_socket_service.dart';
+
 class LocationController extends GetxController {
   static LocationController get to => Get.find<LocationController>();
 
-  /// 상태
   final Rx<LatLng?> currentLatLng = Rx<LatLng?>(null);
-
-  /// 예: "서울특별시 성북구" / "경기도 성남시 분당구"
   final RxString currentShortAddress = ''.obs;
 
-  /// Kakao REST API Key (로컬/역지오코딩 용) — 실제 서비스에선 서버 프록시 권장
+  // ✅ 전체 주소 노출용 필드 (추가)
+  final RxString currentFullAddress = ''.obs;
+
   final String _kakaoApiKey = 'a4ba47d483e2d8f8681d6c36474ff4fd';
 
   StreamSubscription<Position>? _posSub;
-
-  /// 역지오코딩 호출 빈도 조절용 (좌표 변화가 작으면 스킵)
   LatLng? _lastGeocodedLatLng;
-  static const double _minMoveMetersForGeocode = 30; // 30m 이상 이동 시에만 역지오코딩
-
-  /// 연속 호출 방지용 타이머 (디바운스)
+  static const double _minMoveMetersForGeocode = 30;
   Timer? _reverseDebounce;
 
   @override
   void onReady() {
     super.onReady();
-    // 앱 구동 시 단 1회 시작
     startTracking();
   }
 
@@ -41,17 +37,16 @@ class LocationController extends GetxController {
     super.onClose();
   }
 
-  /// 위치 추적 시작 (권한/서비스 체크 포함)
   Future<void> startTracking({bool requestPermissionIfNeeded = true}) async {
-    // 1) 위치 서비스 켜짐 여부
     final enabled = await Geolocator.isLocationServiceEnabled();
     if (!enabled) {
-      print('❌ [Location] 위치 서비스가 꺼져 있습니다.');
-      currentShortAddress.value = ''; // UI는 "위치 확인 중..."일 수 있음
+      print('❌ [Location] 위치 서비스 꺼짐');
+      currentShortAddress.value = '';
+      // ✅ 전체 주소도 초기화
+      currentFullAddress.value = '';
       return;
     }
 
-    // 2) 권한 체크/요청
     var perm = await Geolocator.checkPermission();
     if ((perm == LocationPermission.denied ||
             perm == LocationPermission.deniedForever) &&
@@ -60,12 +55,13 @@ class LocationController extends GetxController {
     }
     if (perm == LocationPermission.denied ||
         perm == LocationPermission.deniedForever) {
-      print('❌ [Location] 권한 거부 상태: $perm');
+      print('❌ [Location] 권한 거부: $perm');
       currentShortAddress.value = '';
+      // ✅ 전체 주소도 초기화
+      currentFullAddress.value = '';
       return;
     }
 
-    // 3) 최초 1회 현재 위치
     try {
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.best,
@@ -73,13 +69,18 @@ class LocationController extends GetxController {
       );
       final latlng = LatLng(pos.latitude, pos.longitude);
       currentLatLng.value = latlng;
-      _scheduleReverseGeocode(latlng); // 디바운스 적용
+      _scheduleReverseGeocode(latlng);
+
+      // 초기 좌표/주소 등록 (전송은 서비스의 예약 로직이 담당)
+      LocationSocketService.instance.updateLatestPosition(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        addressShort: currentShortAddress.value,
+      );
     } catch (e) {
       print('❌ [Location] 현재 위치 조회 실패: $e');
-      // 주소 비움 → 홈은 "위치 확인 중..." 유지
     }
 
-    // 4) 스트림 구독 (10m 변위)
     _posSub?.cancel();
     _posSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -89,21 +90,31 @@ class LocationController extends GetxController {
     ).listen((pos) {
       final latlng = LatLng(pos.latitude, pos.longitude);
       currentLatLng.value = latlng;
-      _scheduleReverseGeocode(latlng); // 이동 시 역지오코딩 (디바운스/거리 임계)
+      _scheduleReverseGeocode(latlng);
+
+      // 주기 전송은 서비스가 담당 → 최신 좌표만 갱신
+      LocationSocketService.instance.updateLatestPosition(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        addressShort: currentShortAddress.value,
+      );
     });
   }
 
-  /// 외부(MapPage 등)에서 좌표를 직접 반영할 때 사용
   Future<void> setLatLng(LatLng latlng, {bool updateAddress = true}) async {
     currentLatLng.value = latlng;
     if (updateAddress) {
       _scheduleReverseGeocode(latlng);
     }
+
+    LocationSocketService.instance.updateLatestPosition(
+      lat: latlng.latitude,
+      lng: latlng.longitude,
+      addressShort: currentShortAddress.value,
+    );
   }
 
-  /// 역지오코딩 호출 스케줄링(디바운스 + 이동 거리 임계)
   void _scheduleReverseGeocode(LatLng latlng) {
-    // 이동거리 체크 (너무 자주 호출 방지)
     if (_lastGeocodedLatLng != null) {
       final d = Geolocator.distanceBetween(
         _lastGeocodedLatLng!.latitude,
@@ -112,18 +123,19 @@ class LocationController extends GetxController {
         latlng.longitude,
       );
       if (d < _minMoveMetersForGeocode) {
-        // 30m 미만 이동이면 스킵
         return;
       }
     }
 
     _reverseDebounce?.cancel();
     _reverseDebounce = Timer(const Duration(milliseconds: 400), () {
+      // ✅ 기존: 축약 주소 업데이트
       _updateShortAddressBy(latlng);
+      // ✅ 추가: 전체 주소 업데이트
+      _updateFullAddressBy(latlng);
     });
   }
 
-  /// Kakao Local: 좌표 → 행정동(시/구/동)
   Future<void> _updateShortAddressBy(LatLng latlng) async {
     _lastGeocodedLatLng = latlng;
 
@@ -140,8 +152,7 @@ class LocationController extends GetxController {
           .timeout(const Duration(seconds: 6));
 
       if (res.statusCode != 200) {
-        print('❌ [Kakao Local] 실패 status=${res.statusCode} body=${res.body}');
-        // 실패 시 비움 (UI는 "위치 확인 중...")
+        print('❌ [Kakao Local] 실패 status=${res.statusCode}');
         currentShortAddress.value = '';
         return;
       }
@@ -149,12 +160,11 @@ class LocationController extends GetxController {
       final data = json.decode(res.body);
       final docs = (data['documents'] as List?) ?? [];
       if (docs.isEmpty) {
-        print('❌ [Kakao Local] documents가 비었습니다. body=${res.body}');
+        print('❌ [Kakao Local] documents 없음');
         currentShortAddress.value = '';
         return;
       }
 
-      // region_type == 'H'(행정동)이 있으면 우선 사용, 없으면 첫 항목
       final admin = docs.firstWhere(
         (e) => e['region_type'] == 'H',
         orElse: () => docs.first,
@@ -162,15 +172,98 @@ class LocationController extends GetxController {
 
       final r1 = admin['region_1depth_name'] ?? '';
       final r2 = admin['region_2depth_name'] ?? '';
-      // 필요 시 r3도 사용 가능
-      // final r3 = admin['region_3depth_name'] ?? '';
-
       final short = '$r1 $r2'.trim();
+
       currentShortAddress.value = short;
       print('✅ [Kakao Local] 주소 업데이트: $short');
+
+      final pos = currentLatLng.value;
+      if (pos != null) {
+        LocationSocketService.instance.updateLatestPosition(
+          lat: pos.latitude,
+          lng: pos.longitude,
+          addressShort: short,
+        );
+      }
     } catch (e) {
       print('❌ [Kakao Local] 예외: $e');
       currentShortAddress.value = '';
+    }
+  }
+
+  // ✅ 추가: 전체 주소 업데이트 (coord2address 사용)
+  Future<void> _updateFullAddressBy(LatLng latlng) async {
+    try {
+      final url =
+          'https://dapi.kakao.com/v2/local/geo/coord2address.json'
+          '?x=${latlng.longitude}&y=${latlng.latitude}';
+
+      final res = await http
+          .get(
+            Uri.parse(url),
+            headers: {'Authorization': 'KakaoAK $_kakaoApiKey'},
+          )
+          .timeout(const Duration(seconds: 6));
+
+      if (res.statusCode != 200) {
+        print('❌ [Kakao Local] (full) 실패 status=${res.statusCode}');
+        currentFullAddress.value = '';
+        return;
+      }
+
+      final data = json.decode(res.body);
+      final docs = (data['documents'] as List?) ?? [];
+      if (docs.isEmpty) {
+        print('❌ [Kakao Local] (full) documents 없음');
+        currentFullAddress.value = '';
+        return;
+      }
+
+      // 도로명 주소가 있으면 우선 사용, 없으면 지번 주소 사용
+      final road = docs.first['road_address'];
+      final addr = docs.first['address'];
+
+      String full = '';
+      if (road != null) {
+        // 예: 경기도 광명시 광명동 오리로 1250-0 101동 101호
+        final r1 = road['region_1depth_name'] ?? '';
+        final r2 = road['region_2depth_name'] ?? '';
+        final r3 = road['region_3depth_name'] ?? '';
+        final roadName = road['road_name'] ?? '';
+        final mainNo = road['main_building_no'] ?? '';
+        final subNo =
+            (road['sub_building_no'] ?? '').toString().isNotEmpty
+                ? '-${road['sub_building_no']}'
+                : '';
+        final building = (road['building_name'] ?? '').toString().trim();
+        final zone = (road['zone_no'] ?? '').toString().trim();
+
+        // building/zone 존재 시 괄호로 보조 정보 덧붙임
+        final extra = [
+          building.isNotEmpty ? building : null,
+          zone.isNotEmpty ? zone : null,
+        ].whereType<String>().join(', ');
+
+        full =
+            '$r1 $r2 $r3 $roadName $mainNo$subNo${extra.isNotEmpty ? ' ($extra)' : ''}'
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+      } else if (addr != null) {
+        final r1 = addr['region_1depth_name'] ?? '';
+        final r2 = addr['region_2depth_name'] ?? '';
+        final r3 = addr['region_3depth_name'] ?? '';
+        final mNo = (addr['main_address_no'] ?? '').toString();
+        final sNo = (addr['sub_address_no'] ?? '').toString();
+        final detail = sNo.isNotEmpty ? '$mNo-$sNo' : mNo;
+
+        full = '$r1 $r2 $r3 $detail'.replaceAll(RegExp(r'\s+'), ' ').trim();
+      }
+
+      currentFullAddress.value = full;
+      print('✅ [Kakao Local] 전체 주소 업데이트: $full');
+    } catch (e) {
+      print('❌ [Kakao Local] (full) 예외: $e');
+      currentFullAddress.value = '';
     }
   }
 }

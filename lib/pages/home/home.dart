@@ -1,52 +1,76 @@
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
-
 import 'survey_module.dart';
 
-import 'package:shimbox_app/models/adjusted_volume_dialog.dart'; // TODO(임시 미리보기): 나중에 삭제 가능
-import 'package:shimbox_app/controllers/alarm_controller.dart'; // TODO(임시 미리보기)
-import 'package:shimbox_app/models/alarm/alarm_item.dart'; // TODO(임시 미리보기)
+import 'package:shimbox_app/models/adjusted_volume_dialog.dart';
+import 'package:shimbox_app/controllers/alarm_controller.dart';
+import 'package:shimbox_app/models/alarm/alarm_item.dart';
 
-// 기존 import 유지
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
-import 'package:get/get_core/src/get_main.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
+
+import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HomePage extends StatefulWidget {
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final BottomNavController bottomController;
 
-  List<Map<String, dynamic>> deliveryAreas = []; // ✅ API 연동으로 대체됨
-
+  List<Map<String, dynamic>> deliveryAreas = [];
   int totalDeliveries = 0;
   int completedDeliveries = 0;
 
   final PageController _pageController = PageController();
-
   int _currentPage = 0;
   bool showSurvey = false;
-
-  // final bottomController = Get.find<BottomNavController>();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     fetchDeliverySummary();
 
-    // ✅ 현재 위치 추적 시작 (권한 요청 포함)
-    // 앱 최초 진입 시 한 번만 호출되어도 됨 (main에서 호출했다면 생략 가능)
-    LocationController.to.startTracking();
-
     bottomController = Get.find<BottomNavController>();
+
+    // 지역값으로 WS 연결
+    _connectLocationWsOnce();
+
+    // ✅ 홈 최초 진입: 즉시 1회 전송 예약
+    LocationSocketService.instance.markHomeEntered();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 앱이 백그라운드 -> 포그라운드(Resumed)로 돌아왔고 홈이 보이는 상태라면 1회 전송 예약
+    if (state == AppLifecycleState.resumed) {
+      LocationSocketService.instance.markHomeEntered();
+      fetchDeliverySummary(); // ✅ 복귀 시 요약 갱신
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버 (빌드 컨텍스트 확보 후)
+    LocationSocketService.instance.markHomeEntered();
+    fetchDeliverySummary(); // ✅ 화면 다시 보일 때도 갱신
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _pageController.dispose();
+    LocationSocketService.instance.disconnect();
+    super.dispose();
   }
 
   Future<void> fetchDeliverySummary() async {
@@ -55,14 +79,12 @@ class _HomePageState extends State<HomePage> {
       int total = 0;
       int completed = 0;
 
-      // "서울특별시 성북구" 처럼 구 단위로 정규화
       String normalizeToGu(String? raw) {
         if (raw == null) return '';
         final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
-        return formatKoreanAddress(s); // 이미 파일에 있는 함수: 시/도 + 구 까지만 남김
+        return formatKoreanAddress(s);
       }
 
-      // 구 단위로 합산
       final Map<String, Map<String, int>> buckets = {};
       for (final area in data) {
         final key = normalizeToGu(area['shippingLocation']?.toString());
@@ -84,7 +106,7 @@ class _HomePageState extends State<HomePage> {
           buckets.entries
               .map(
                 (e) => {
-                  'name': e.key, // ← 리스트 아이템에서 그대로 사용
+                  'name': e.key,
                   'total': e.value['total']!,
                   'completed': e.value['completed']!,
                 },
@@ -109,15 +131,6 @@ class _HomePageState extends State<HomePage> {
     return fullName.substring(fullName.length - 2);
   }
 
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
-
-  // =========================
-  // ✅ 진행률/상태 텍스트 & 색상
-  // =========================
   String _areaStatusText(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -153,25 +166,43 @@ class _HomePageState extends State<HomePage> {
   Color _areaStatusColor(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    if (total > 0 && done >= total) return const Color(0xFF61D5AB); // 완료 → 초록
-    if (done == 0) return Colors.grey; // 미완료 → 회색
-    return const Color(0xFF747474); // 진행중 → 진한 회색
+    if (total > 0 && done >= total) return const Color(0xFF61D5AB);
+    if (done == 0) return Colors.grey;
+    return const Color(0xFF747474);
   }
 
-  // ✅ 추가: "진행 중.." 여부 (0 < done < total)
+  // ✅ 진행중 판정 완화: 완료가 전체보다 적으면 진행중(완료 0이어도 시작됐다고 가정하여 초록)
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    return total > 0 && done > 0 && done < total;
+    return total > 0 && done < total;
   }
 
-  // ✅ 추가: "완료" 여부 (done >= total)
   bool _isAreaCompleted(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
     return total > 0 && done >= total;
   }
-  // =========================
+
+  String _extractGu(String? s) {
+    if (s == null) return '';
+    final t = s.trim();
+    final m = RegExp(r'([가-힣A-Za-z]+구)').firstMatch(t);
+    return m != null ? m.group(1)! : t;
+  }
+
+  Future<void> _connectLocationWsOnce() async {
+    final raw = LocationController.to.currentShortAddress.value;
+    String region = _extractGu(raw);
+
+    if (region.isEmpty && deliveryAreas.isNotEmpty) {
+      region = _extractGu(deliveryAreas.first['name']?.toString());
+    }
+
+    if (region.isEmpty) region = '성북구';
+
+    await LocationSocketService.instance.connect(region: region);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -216,74 +247,99 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 유저 정보 영역 -------------------------------------------------
+                  // 유저 정보
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          ClipOval(
-                            child: Image.asset(
-                              'assets/images/home/hong.png',
-                              width: 63.84,
-                              height: 63,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${UserData.name ?? '사용자'}님',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18,
-                                ),
+                      // ⬅️ 왼쪽 묶음을 Expanded로 감싸고, 내부 Column에도 폭 제약 전달
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipOval(
+                              child: Image.asset(
+                                'assets/images/home/hong.png',
+                                width: 63.84,
+                                height: 63,
+                                fit: BoxFit.cover,
                               ),
-                              const SizedBox(height: 4),
-                              Row(
+                            ),
+                            const SizedBox(width: 10),
+                            // Column에 확실히 width 제약 전달
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  SvgPicture.asset(
-                                    'assets/images/home/marker.svg',
-                                    width: 17,
-                                    height: 17,
-                                    color: Colors.grey,
+                                  Text(
+                                    '${UserData.name ?? '사용자'}님',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 18,
+                                    ),
                                   ),
-                                  const SizedBox(width: 5),
-                                  // ✅ DB 주소 대신 현재 위치 주소 (LocationController)
-                                  Obx(() {
-                                    final raw =
-                                        LocationController
-                                            .to
-                                            .currentShortAddress
-                                            .value;
-                                    final pos =
-                                        LocationController
-                                            .to
-                                            .currentLatLng
-                                            .value;
-                                    final display =
-                                        raw.isNotEmpty
-                                            ? formatKoreanAddress(raw)
-                                            : (pos != null
-                                                ? '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}'
-                                                : '위치 확인 중...');
-                                    return Text(
-                                      display,
-                                      style: const TextStyle(
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize:
+                                        MainAxisSize.min, // shrink-wrap
+                                    children: [
+                                      SvgPicture.asset(
+                                        'assets/images/home/marker.svg',
+                                        width: 17,
+                                        height: 17,
                                         color: Colors.grey,
-                                        fontSize: 13,
                                       ),
-                                    );
-                                  }),
+                                      const SizedBox(width: 5),
+                                      // 기존 Flexible(...) 안의 Obx 교체
+                                      Flexible(
+                                        fit: FlexFit.loose,
+                                        child: Obx(() {
+                                          final full =
+                                              LocationController
+                                                  .to
+                                                  .currentFullAddress
+                                                  .value
+                                                  .trim();
+                                          final short =
+                                              LocationController
+                                                  .to
+                                                  .currentShortAddress
+                                                  .value
+                                                  .trim();
+                                          final pos =
+                                              LocationController
+                                                  .to
+                                                  .currentLatLng
+                                                  .value;
+
+                                          final display =
+                                              full.isNotEmpty
+                                                  ? full
+                                                  : (short.isNotEmpty
+                                                      ? short
+                                                      : (pos != null
+                                                          ? '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}'
+                                                          : '위치 확인 중...'));
+
+                                          return Text(
+                                            display.replaceAll('\n', ' '),
+                                            style: const TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 13,
+                                            ),
+                                            softWrap: true, // ✅ 전체 줄바꿈 허용
+                                          );
+                                        }),
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
-                            ],
-                          ),
-                        ],
+                            ),
+                          ],
+                        ),
                       ),
                       GestureDetector(
                         onTap:
@@ -305,7 +361,7 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 35),
 
-                  // 출근/퇴근 박스 -------------------------------------------------
+                  // 출근/퇴근 박스
                   Center(
                     child: GestureDetector(
                       onTap: () async {
@@ -459,14 +515,13 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 50),
 
-                  // 오늘의 배송 ----------------------------------------------------
+                  // 오늘의 배송
                   const Text(
                     '오늘의 배송',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
 
-                  // 배송 상태(전체)
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -537,7 +592,6 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 16),
 
-                  // 배송 목록 (지역별 진행 상태 표시) -------------------------------
                   Expanded(
                     child: ListView.builder(
                       itemCount: deliveryAreas.length,
@@ -604,7 +658,7 @@ class _HomePageState extends State<HomePage> {
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
                               if (changed == true) {
-                                await fetchDeliverySummary();
+                                await fetchDeliverySummary(); // ✅ 상세 변경 반영
                               }
                             },
                           ),
@@ -617,29 +671,24 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ),
-
         if (showSurvey)
           SurveyModule(
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
-              final dummySuccess = await ApiService.createDummyHealthRecord();
-              if (!dummySuccess) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(const SnackBar(content: Text('건강 데이터 생성 실패')));
-                }
-                return;
-              }
+              // (선택) 더미 건강데이터는 실패해도 설문/퇴근은 진행
+              // final dummySuccess = await ApiService.createDummyHealthRecord();
+              // if (!dummySuccess && context.mounted) {
+              //   ScaffoldMessenger.of(context).showSnackBar(
+              //     const SnackBar(content: Text('건강 데이터 생성 실패 (설문은 계속 진행)')),
+              //   );
+              // }
 
+              // ✅ submitHealthSurvey는 문자열 3개만!
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
                 finish2: finish2,
                 finish3: finish3,
-                step: UserData.stepCount ?? 0,
-                heartRate: UserData.heartRate ?? 0,
-                conditionStatus: UserData.conditionStatus ?? '미정',
               );
 
               if (!surveySuccess) {
@@ -651,6 +700,7 @@ class _HomePageState extends State<HomePage> {
                 return;
               }
 
+              // ✅ 시간 포맷 수정 (toStringAsFixed 제거)
               final now = DateTime.now();
               final time =
                   '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
@@ -678,9 +728,7 @@ class _HomePageState extends State<HomePage> {
               bottomController.changeBottomNav(0);
               _pageController.jumpToPage(0);
             },
-            onClose: (_) {
-              setState(() => showSurvey = false);
-            },
+            onClose: (_) => setState(() => showSurvey = false),
           ),
       ],
     );

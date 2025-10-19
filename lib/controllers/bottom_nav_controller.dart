@@ -22,10 +22,9 @@ class BottomNavController extends GetxController {
   }
 
   /// 상세로 push 하고 결과(bool?)를 반환. (Future가 null일 수 있어 ?? 로 보정)
-  Future<bool?> goToDeliveryDetail(Map<String, dynamic> area) {
-    final future = Get.to<bool>(
-      () => DeliveryDetailPage(area: area),
-    ); // Future<bool?>?
-    return future ?? Future.value(null); // <- 핵심!
+  Future<bool?> goToDeliveryDetail(Map<String, dynamic> area) async {
+    final result = await Get.to(() => DeliveryDetailPage(area: area));
+    // 상세가 상태를 바꿨다면 true를 돌려준다.
+    return result == true;
   }
 }

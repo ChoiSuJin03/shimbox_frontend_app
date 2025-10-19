@@ -1,10 +1,8 @@
-/// - 배송 상세 리스트의 **상단 주소 타일(펼침/접기 헤더)** UI.
-
 import 'package:flutter/material.dart';
 import '../../../../utils/address_utils.dart';
 
 class AreaTile extends StatelessWidget {
-  final String name; // ex) "$base $building"
+  final String name; // ex) "OO로 123" 또는 "기타"
   final int total; // 총 건수
   final int progressed; // 진행(시작+완료)
   final int doneCount; // 완료
@@ -26,7 +24,6 @@ class AreaTile extends StatelessWidget {
     final inProgressCount = progressed - doneCount;
     final isAllDone = progressed == total && total > 0 && inProgressCount == 0;
 
-    // 마커 색상 3단계 (기존 로직 그대로)
     Color markerBg;
     Color markerIcon;
     if (progressed == 0) {
@@ -74,29 +71,20 @@ class AreaTile extends StatelessWidget {
                 color: markerBg,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Center(
-                // 프로젝트에서 SVG를 쓰고 있다면 여기를 SvgPicture.asset(...)로 교체하세요.
-                child: Icon(Icons.location_on, size: 24),
-              ),
+              child: Icon(Icons.location_on, size: 24, color: markerIcon),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          headerL1 + (isAllDone ? ' (배송완료)' : ''),
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: headerTextColor,
-                          ),
-                        ),
-                      ),
-                    ],
+                  Text(
+                    headerL1 + (isAllDone ? ' (배송완료)' : ''),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: headerTextColor,
+                    ),
                   ),
                   if (headerL2.isNotEmpty)
                     Text(
