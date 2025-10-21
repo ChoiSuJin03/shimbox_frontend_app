@@ -1,12 +1,17 @@
+// lib/pages/health/health_page.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:shimbox_app/pages/health/health_connect_service.dart';
-import 'package:shimbox_app/pages/wearable/wearable.dart';
+
+import 'package:shimbox_app/pages/health/health_service.dart';
 import 'package:shimbox_app/utils/api_service.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
-import 'package:shimbox_app/pages/health/health_alert_dialog.dart'; // TODO(임시 미리보기): 건강 경고 팝업 미리보기용 import
+import 'package:shimbox_app/pages/health/health_alert_dialog.dart';
+
+// ✅ 건강은 위치 소켓(LocationSocketService)을 통해서만 전송
+import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HealthPage extends StatefulWidget {
   const HealthPage({super.key});
@@ -15,52 +20,100 @@ class HealthPage extends StatefulWidget {
   State<HealthPage> createState() => _HealthPageState();
 }
 
-class _HealthPageState extends State<HealthPage> {
+class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
+  final _service = HealthService();
+
   String _stepCount = '연동 필요';
   int _stepCountValue = 0;
-  int? _weeklyAverage;
+
   String _heartRate = '연동 필요';
   int _heartRateValue = 0;
+
   bool _isLoadingStep = false;
   bool _isLoadingHeartRate = false;
   bool _isHealthConnected = false;
+
+  DateTime? _lastStepUpdatedAt;
+  DateTime? _lastHeartUpdatedAt;
+
   int _todayDeliveryCount = 0;
 
+  // ── 피로도 UI용 상수 (그대로 유지) ─────────────────────────────
   final fatigueLevel = 'HIGH';
-  final fatigueColor = Color(0xFFFF8A8A);
+  final fatigueColor = const Color(0xFFFF8A8A);
   final fatigueMessage = '오늘은 좀 피곤하실 것 같네요.\n휴식이 필요해요!';
 
+  // 데모 차트
   final workChartHeights = [77.0, 78.0, 55.0, 76.0, 71.0];
   final workChartLabels = ['월요일', '화요일', '수요일', '목요일', '금요일'];
-
   final deliveryChartHeights = [65.0, 60.0, 72.0, 55.0, 53.0];
   final deliveryChartLabels = ['월요일', '화요일', '수요일', '목요일', '금요일'];
-
-  String get workTime {
-    if (UserData.workStart != null && UserData.workEnd != null) {
-      final duration = UserData.workEnd!.difference(UserData.workStart!);
-      return '${duration.inHours}시간 ${duration.inMinutes.remainder(60)}분';
-    }
-    return '정보 없음';
-  }
-
-  String get workTimeSub => '주간 평균 ${UserData.weeklyWorkAvgHours ?? 0}시간';
-
-  String get deliveryCount => '$_todayDeliveryCount건';
-
-  String get deliverySub {
-    final today = _todayDeliveryCount;
-    final avg = 0;
-    final diff = today - avg;
-    final sign = diff >= 0 ? '+' : '';
-    return '평균 대비 $sign$diff건';
-  }
 
   @override
   void initState() {
     super.initState();
-    _checkHealthConnection();
-    _fetchDeliveryCount();
+    WidgetsBinding.instance.addObserver(this);
+    _boot();
+
+    // ✅ HealthPage 진입: 소켓이 이미 연결되어 있다면
+    // 즉시 1회 전송 + 페이지 열려있는 동안만 주기 전송 시작
+    _startHealthStreaming();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 앱 포그라운드/백그라운드 전환에 따라 건강 주기 전송 on/off
+    if (state == AppLifecycleState.resumed) {
+      _startHealthStreaming();
+    } else {
+      _stopHealthStreaming();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stopHealthStreaming(); // ✅ 페이지 떠날 때 건강 주기 전송 중지
+    super.dispose();
+  }
+
+  // ───────────────────────────────────────────
+  // 건강 스트리밍 제어 (이 페이지에서만 보냄)
+  // ───────────────────────────────────────────
+  void _startHealthStreaming() {
+    if (!LocationSocketService.instance.isConnected) return;
+
+    // 즉시 1회
+    LocationSocketService.instance.sendHealthNow();
+
+    // 페이지 열려있는 동안만 주기 전송
+    LocationSocketService.instance.startHealthPeriodic(
+      interval: const Duration(seconds: 30),
+    );
+  }
+
+  void _stopHealthStreaming() {
+    LocationSocketService.instance.stopHealthPeriodic();
+  }
+
+  // ───────────────────────────────────────────
+  // 초기 부팅/데이터 로딩
+  // ───────────────────────────────────────────
+  Future<void> _boot() async {
+    await _checkHealthConnection();
+    await _maybeAutoPromptHealthConnect();
+    await _fetchDeliveryCount();
+  }
+
+  Future<void> _refreshAllAndSendOnce() async {
+    await _fetchStepCount();
+    await _fetchHeartRate();
+    await _sendHealthToServer();
+
+    // UI 갱신 직후 한 번 더 서버에 health 송신
+    if (LocationSocketService.instance.isConnected) {
+      await LocationSocketService.instance.sendHealthNow();
+    }
   }
 
   Future<void> _fetchDeliveryCount() async {
@@ -70,29 +123,61 @@ class _HealthPageState extends State<HealthPage> {
       for (final area in data) {
         count += (area['completedCount'] ?? 0) as int;
       }
-      setState(() {
-        _todayDeliveryCount = count;
-      });
-    } catch (e) {
-      print('❌ 배송 완료 건수 불러오기 실패: $e');
-    }
+      if (!mounted) return;
+      setState(() => _todayDeliveryCount = count);
+    } catch (_) {}
   }
 
   Future<void> _checkHealthConnection() async {
     final prefs = await SharedPreferences.getInstance();
     final isConnected = prefs.getBool('health_connected') ?? false;
-    setState(() {
-      _isHealthConnected = isConnected;
-    });
+    if (!mounted) return;
+    setState(() => _isHealthConnected = isConnected);
+
     if (isConnected) {
-      await _fetchStepCount();
-      await _fetchHeartRate();
-      await _sendHealthToServer();
+      await _refreshAllAndSendOnce();
     } else {
       setState(() {
         _stepCount = '연동 필요';
         _heartRate = '연동 필요';
       });
+    }
+  }
+
+  Future<void> _maybeAutoPromptHealthConnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final promptedOnce = prefs.getBool('health_prompted_once') ?? false;
+    if (_isHealthConnected || promptedOnce) return;
+
+    setState(() {
+      _isLoadingStep = true;
+      _isLoadingHeartRate = true;
+    });
+
+    final ok = await _service.connect();
+    await prefs.setBool('health_prompted_once', true);
+
+    if (!mounted) return;
+
+    setState(() {
+      _isHealthConnected = ok;
+      _isLoadingStep = false;
+      _isLoadingHeartRate = false;
+    });
+
+    if (ok) {
+      setState(() {
+        _stepCount = '...';
+        _heartRate = '...';
+      });
+      await _refreshAllAndSendOnce();
+      _startHealthStreaming(); // 권한 허용 직후에도 페이지 열려 있으면 주기 전송 시작
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Health Connect 권한을 허용해 주세요.')),
+        );
+      }
     }
   }
 
@@ -127,18 +212,21 @@ class _HealthPageState extends State<HealthPage> {
               ],
             ),
       );
-
       if (shouldDisconnect == true) {
-        await HealthConnectService.disconnect();
+        await _service.disconnect();
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('health_connected', false);
+        if (!mounted) return;
         setState(() {
           _isHealthConnected = false;
           _stepCount = '연동 필요';
           _heartRate = '연동 필요';
-          _weeklyAverage = null;
         });
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('웨어러블 연동이 해제되었습니다.')));
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('웨어러블 연동이 해제되었습니다.')));
+        }
       }
       return;
     }
@@ -147,63 +235,70 @@ class _HealthPageState extends State<HealthPage> {
       _isLoadingStep = true;
       _isLoadingHeartRate = true;
     });
-    final result = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const WearablePage()),
-    );
+    final ok = await _service.connect();
+    if (!mounted) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('health_prompted_once', true);
+    await prefs.setBool('health_connected', ok);
+
     setState(() {
       _isLoadingStep = false;
       _isLoadingHeartRate = false;
+      _isHealthConnected = ok;
     });
 
-    if (result == true) {
+    if (ok) {
       setState(() {
-        _isHealthConnected = true;
         _stepCount = '...';
         _heartRate = '...';
       });
-      await _fetchStepCount();
-      await _fetchHeartRate();
-      await _sendHealthToServer();
+      await _refreshAllAndSendOnce();
+      _startHealthStreaming();
     } else {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('헬스 서비스 연동이 취소되었습니다.')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Health Connect 권한을 허용해 주세요.')),
+        );
+      }
     }
   }
 
+  // ===== 데이터 가져오기 =====
   Future<void> _fetchStepCount() async {
     setState(() {
       _isLoadingStep = true;
-      _weeklyAverage = null;
       _stepCount = '...';
     });
 
     try {
-      final steps = await HealthConnectService.getPast7DaysSteps();
-      final nonZero = steps.where((e) => e > 0).toList();
-      final average =
-          nonZero.isNotEmpty
-              ? (nonZero.reduce((a, b) => a + b) / nonZero.length).round()
-              : 0;
-      final today = steps.isNotEmpty ? steps.last : 0;
-
+      final today = await _service.getTodaySteps();
+      if (!mounted) return;
       setState(() {
         _stepCountValue = today;
         _stepCount = today.toString();
-        _weeklyAverage = average;
+        _lastStepUpdatedAt = DateTime.now();
         UserData.stepCount = today;
       });
+
+      if (LocationSocketService.instance.isConnected) {
+        await LocationSocketService.instance.sendHealthNow();
+      }
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('걸음 수 가져오기 실패: $e')));
+      if (!mounted) return;
       setState(() {
         _stepCount = '오류';
-        _weeklyAverage = null;
+        _lastStepUpdatedAt = null;
       });
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('걸음 수 가져오기 실패: $e')));
+      }
     } finally {
-      setState(() => _isLoadingStep = false);
+      if (mounted) {
+        setState(() => _isLoadingStep = false);
+      }
     }
   }
 
@@ -214,27 +309,40 @@ class _HealthPageState extends State<HealthPage> {
     });
 
     try {
-      final avgHeartRate = await HealthConnectService.getTodayHeartRateAvg();
+      final hr = await _service.getCurrentHeartRate();
+      if (!mounted) return;
       setState(() {
-        _heartRateValue = avgHeartRate;
-        _heartRate = avgHeartRate > 0 ? '$avgHeartRate bpm' : '데이터 없음';
-        UserData.heartRate = avgHeartRate;
+        _heartRateValue = hr;
+        _heartRate = hr > 0 ? '$hr bpm' : '데이터 없음';
+        _lastHeartUpdatedAt = DateTime.now();
+        UserData.heartRate = hr;
       });
+
+      if (LocationSocketService.instance.isConnected) {
+        await LocationSocketService.instance.sendHealthNow();
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('심박수 데이터를 불러오는 데 실패했어요.\nGoogle Fit 연동을 확인해주세요.'),
-          duration: Duration(seconds: 4),
-        ),
-      );
+      if (!mounted) return;
       setState(() {
         _heartRate = '오류';
+        _lastHeartUpdatedAt = null;
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('심박수 데이터를 불러오는 데 실패했어요.\nHealth Connect 권한을 확인해주세요.'),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
     } finally {
-      setState(() => _isLoadingHeartRate = false);
+      if (mounted) {
+        setState(() => _isLoadingHeartRate = false);
+      }
     }
   }
 
+  // ===== 표시 유틸 =====
   String _formattedDate() {
     final now = DateTime.now();
     final weekdayKor = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'];
@@ -242,6 +350,16 @@ class _HealthPageState extends State<HealthPage> {
     return '$formatted ${weekdayKor[now.weekday - 1]}';
   }
 
+  String _recencyText(DateTime? when) {
+    if (when == null) return '데이터 없음';
+    final diff = DateTime.now().difference(when);
+    if (diff.inMinutes < 1) return '방금 전';
+    if (diff.inHours < 1) return '최근 ${diff.inMinutes}분 전';
+    if (diff.inHours < 24) return '최근 ${diff.inHours}시간 전';
+    return DateFormat('MM/dd HH:mm').format(when);
+  }
+
+  // ===== UI =====
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -277,7 +395,6 @@ class _HealthPageState extends State<HealthPage> {
                         ),
                       ],
                     ),
-                    // 기존 웨어러블 연동 버튼 (그대로)
                     TextButton(
                       onPressed: _tryConnectHealthService,
                       style: TextButton.styleFrom(
@@ -302,7 +419,6 @@ class _HealthPageState extends State<HealthPage> {
                         ],
                       ),
                     ),
-                    //  /////////////////////////////////// TODO(임시 미리보기): 건강 경고 팝업 미리보기 버튼 추가
                     IconButton(
                       tooltip: '건강 경고 미리보기',
                       icon: SvgPicture.asset(
@@ -320,10 +436,12 @@ class _HealthPageState extends State<HealthPage> {
                         );
                       },
                     ),
-                    ///////////////////////////////////////////////////////////////
                   ],
                 ),
+
                 const SizedBox(height: 15),
+
+                // ▶ 피로도 카드 (이전 UI에서 가져온 부분)
                 Row(
                   children: [
                     Container(
@@ -364,7 +482,9 @@ class _HealthPageState extends State<HealthPage> {
                     ),
                   ],
                 ),
+
                 const SizedBox(height: 25),
+
                 Row(
                   children: [
                     Expanded(
@@ -374,9 +494,7 @@ class _HealthPageState extends State<HealthPage> {
                         value: _isLoadingStep ? '...' : _stepCount,
                         sub:
                             _isHealthConnected
-                                ? (_weeklyAverage != null
-                                    ? '주간 평균 $_weeklyAverage보'
-                                    : '평균 계산 중...')
+                                ? _recencyText(_lastStepUpdatedAt)
                                 : '연동 필요',
                         subColor:
                             _isHealthConnected ? null : const Color(0xFF61D5AB),
@@ -399,7 +517,7 @@ class _HealthPageState extends State<HealthPage> {
                             _isHealthConnected
                                 ? (_heartRate == '데이터 없음' || _heartRate == '오류'
                                     ? '데이터 없음'
-                                    : '최신 심박수')
+                                    : _recencyText(_lastHeartUpdatedAt))
                                 : '연동 필요',
                         subColor:
                             _isHealthConnected ? null : const Color(0xFF61D5AB),
@@ -409,6 +527,7 @@ class _HealthPageState extends State<HealthPage> {
                     ),
                   ],
                 ),
+
                 const SizedBox(height: 50),
                 _metricCardWithBarChart(
                   iconPath: 'assets/images/health/time.svg',
@@ -436,6 +555,26 @@ class _HealthPageState extends State<HealthPage> {
         ),
       ),
     );
+  }
+
+  String get workTime {
+    if (UserData.workStart != null && UserData.workEnd != null) {
+      final duration = UserData.workEnd!.difference(UserData.workStart!);
+      return '${duration.inHours}시간 ${duration.inMinutes.remainder(60)}분';
+    }
+    return '정보 없음';
+  }
+
+  String get workTimeSub => '주간 평균 ${UserData.weeklyWorkAvgHours ?? 0}시간';
+
+  String get deliveryCount => '$_todayDeliveryCount건';
+
+  String get deliverySub {
+    final today = _todayDeliveryCount;
+    final avg = 0;
+    final diff = today - avg;
+    final sign = diff >= 0 ? '+' : '';
+    return '평균 대비 $sign$diff건';
   }
 
   Widget _healthCard({
@@ -540,37 +679,14 @@ class _HealthPageState extends State<HealthPage> {
                     ),
                   ),
                   const SizedBox(height: 15),
-                  subtitle.contains("평균 대비")
-                      ? Text.rich(
-                        TextSpan(
-                          children: [
-                            const TextSpan(
-                              text: "평균 대비",
-                              style: TextStyle(
-                                fontSize: 17,
-                                color: Color(0xFF7B7B7B),
-                                height: 1,
-                              ),
-                            ),
-                            TextSpan(
-                              text: subtitle.replaceFirst("평균 대비", ""),
-                              style: TextStyle(
-                                fontSize: 17,
-                                color: subtitleColor ?? Colors.grey,
-                                height: 1,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                      : Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 17,
-                          color: subtitleColor ?? Colors.grey,
-                          height: 1,
-                        ),
-                      ),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 17,
+                      color: subtitleColor ?? Colors.grey,
+                      height: 1,
+                    ),
+                  ),
                 ],
               ),
             ),

@@ -1,3 +1,4 @@
+// lib/pages/home/home_page.dart
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'survey_module.dart';
@@ -41,35 +42,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     bottomController = Get.find<BottomNavController>();
 
-    // 지역값으로 WS 연결
+    // 지역값으로 WS 연결 (앱 시작 시 1회)
     _connectLocationWsOnce();
 
-    // ✅ 홈 최초 진입: 즉시 1회 전송 예약
+    // ✅ 홈 최초 진입: 위치 즉시 1회 전송 예약
     LocationSocketService.instance.markHomeEntered();
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 앱이 백그라운드 -> 포그라운드(Resumed)로 돌아왔고 홈이 보이는 상태라면 1회 전송 예약
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state == AppLifecycleState.resumed) {
+      // 홈이 다시 보이면 즉시 1회 전송
       LocationSocketService.instance.markHomeEntered();
-      fetchDeliverySummary(); // ✅ 복귀 시 요약 갱신
+
+      // ✅ 혹시 끊겨 있으면 재연결 보강
+      if (!LocationSocketService.instance.isConnected) {
+        await _connectLocationWsOnce();
+      }
+
+      // 복귀 시 요약 갱신
+      fetchDeliverySummary();
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버 (빌드 컨텍스트 확보 후)
+    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버
     LocationSocketService.instance.markHomeEntered();
-    fetchDeliverySummary(); // ✅ 화면 다시 보일 때도 갱신
+    fetchDeliverySummary(); // 화면 다시 보일 때도 갱신
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
-    LocationSocketService.instance.disconnect();
+    // ❌ 여기서 disconnect() 하지 마세요. (앱 전역에서 WS 유지)
+    // LocationSocketService.instance.disconnect();
     super.dispose();
   }
 
@@ -116,6 +125,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               (a, b) => (a['name'] as String).compareTo(b['name'] as String),
             );
 
+      if (!mounted) return;
       setState(() {
         deliveryAreas = areas;
         totalDeliveries = total;
@@ -171,7 +181,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return const Color(0xFF747474);
   }
 
-  // ✅ 진행중 판정 완화: 완료가 전체보다 적으면 진행중(완료 0이어도 시작됐다고 가정하여 초록)
+  // 진행중 판정: 완료가 전체보다 적으면 진행중
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -198,9 +208,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (region.isEmpty && deliveryAreas.isNotEmpty) {
       region = _extractGu(deliveryAreas.first['name']?.toString());
     }
-
     if (region.isEmpty) region = '성북구';
 
+    print('[HOME] connect WS with region="$region"');
     await LocationSocketService.instance.connect(region: region);
   }
 
@@ -252,7 +262,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // ⬅️ 왼쪽 묶음을 Expanded로 감싸고, 내부 Column에도 폭 제약 전달
                       Expanded(
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -266,7 +275,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ),
                             ),
                             const SizedBox(width: 10),
-                            // Column에 확실히 width 제약 전달
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -282,8 +290,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   Row(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
-                                    mainAxisSize:
-                                        MainAxisSize.min, // shrink-wrap
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
                                       SvgPicture.asset(
                                         'assets/images/home/marker.svg',
@@ -292,7 +299,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         color: Colors.grey,
                                       ),
                                       const SizedBox(width: 5),
-                                      // 기존 Flexible(...) 안의 Obx 교체
                                       Flexible(
                                         fit: FlexFit.loose,
                                         child: Obx(() {
@@ -329,7 +335,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                               color: Colors.grey,
                                               fontSize: 13,
                                             ),
-                                            softWrap: true, // ✅ 전체 줄바꿈 허용
+                                            softWrap: true,
                                           );
                                         }),
                                       ),
@@ -380,9 +386,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             bottomController.checkInTime.value = time;
                             bottomController.isCheckedOut.value = false;
                           } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('출근 상태 변경 실패')),
-                            );
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('출근 상태 변경 실패')),
+                              );
+                            }
                           }
                         } else {
                           if (bottomController.isCheckedIn.value) {
@@ -676,14 +684,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
-              // (선택) 더미 건강데이터는 실패해도 설문/퇴근은 진행
-              // final dummySuccess = await ApiService.createDummyHealthRecord();
-              // if (!dummySuccess && context.mounted) {
-              //   ScaffoldMessenger.of(context).showSnackBar(
-              //     const SnackBar(content: Text('건강 데이터 생성 실패 (설문은 계속 진행)')),
-              //   );
-              // }
-
               // ✅ submitHealthSurvey는 문자열 3개만!
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
@@ -700,7 +700,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 return;
               }
 
-              // ✅ 시간 포맷 수정 (toStringAsFixed 제거)
               final now = DateTime.now();
               final time =
                   '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';

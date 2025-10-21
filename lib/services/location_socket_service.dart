@@ -8,6 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 import 'package:shimbox_app/utils/api_service.dart';
 
+// ✅ 건강 데이터 읽기용
+import 'package:shimbox_app/pages/health/health_service.dart';
+
 class LocationSocketService {
   LocationSocketService._();
   static final LocationSocketService instance = LocationSocketService._();
@@ -17,31 +20,41 @@ class LocationSocketService {
   Timer? _pingTimer;
   Timer? _reconnectTimer;
 
-  // 1분 주기 전송
-  Timer? _periodicTimer;
-  static const Duration _periodicInterval = Duration(minutes: 1);
+  // 위치: 1분 주기 전송
+  Timer? _locationPeriodicTimer;
+  static const Duration _locationPeriodicInterval = Duration(minutes: 1);
+
+  // 건강: 선택적 주기 전송 (HealthPage에서만 start/stop)
+  Timer? _healthPeriodicTimer;
+  Duration _healthPeriodicInterval = const Duration(seconds: 30);
 
   // 최신 위치/주소 캐시
   double? _latestLat;
   double? _latestLng;
   String? _latestAddress;
 
-  // 홈 진입 시 즉시 1회 전송 예약 플래그
+  // 홈 진입 시 즉시 1회 전송 예약 플래그(위치용)
   bool _pendingEnterSend = false;
 
+  // 연결 정보
   String? _region;
   String? _token;
   Uri? _wsUri;
 
   bool get isConnected => _ch != null;
 
-  /// 홈 화면에 들어왔을 때 호출: "즉시 1회"를 예약하고, 가능하면 즉시 전송
+  // ✅ 건강 데이터 소스
+  final HealthService _health = HealthService();
+
+  // ───────────────────────────────────────────
+  // 홈/메인에서 호출: "즉시 1회" 전송 예약 (위치)
+  // ───────────────────────────────────────────
   void markHomeEntered() {
     _pendingEnterSend = true;
     _trySendEnterNow();
   }
 
-  /// 컨트롤러가 최신 좌표/주소를 알려줄 때 호출
+  // 컨트롤러가 최신 좌표/주소를 알려줄 때 호출
   void updateLatestPosition({
     required double lat,
     required double lng,
@@ -55,7 +68,7 @@ class LocationSocketService {
     _trySendEnterNow(); // 좌표가 갱신되면, 예약된 1회 전송을 시도
   }
 
-  /// 지금 가진 최신 좌표를 즉시 1회 전송
+  // 지금 가진 최신 좌표를 즉시 1회 전송
   void sendLatestNow() {
     if (_ch == null) return;
     if (_latestLat == null || _latestLng == null) return;
@@ -67,15 +80,29 @@ class LocationSocketService {
     );
   }
 
-  /// 예약된 "홈 진입 1회" 전송을 조건 만족 시 실행
+  // 예약된 "홈 진입 1회" 전송을 조건 만족 시 실행
   void _trySendEnterNow() {
-    if (!_pendingEnterSend) return;
-    if (!isConnected) return;
-    if (_latestLat == null || _latestLng == null) return;
+    if (!_pendingEnterSend) {
+      // ignore
+      // print('[WS][LOC] _trySendEnterNow: no pending');
+      return;
+    }
+    if (!isConnected) {
+      print('[WS][LOC] _trySendEnterNow: not connected yet');
+      return;
+    }
+    if (_latestLat == null || _latestLng == null) {
+      print('[WS][LOC] _trySendEnterNow: no coords yet');
+      return;
+    }
+    print('[WS][LOC] _trySendEnterNow -> sendLatestNow()');
     sendLatestNow();
     _pendingEnterSend = false;
   }
 
+  // ───────────────────────────────────────────
+  // 연결
+  // ───────────────────────────────────────────
   Uri _buildWsUri({required String token, required String region}) {
     final httpUri = Uri.parse(ApiService.baseUrl);
     final isSecure = httpUri.scheme == 'https';
@@ -87,6 +114,7 @@ class LocationSocketService {
       host: host,
       port: port,
       path: '/ws/location',
+      // 서버 가이드: 기사(mobile)는 반드시 region 필요
       queryParameters: {'token': token, 'as': 'mobile', 'region': region},
     );
   }
@@ -104,17 +132,25 @@ class LocationSocketService {
     _region = region;
     _token = await _getToken();
     if (_token == null || _token!.isEmpty) return;
+
     _wsUri = _buildWsUri(token: _token!, region: region);
+    print('[WS] connecting to ${_wsUri.toString()}');
 
     await _disposeChannel();
     try {
       _ch = WebSocketChannel.connect(_wsUri!);
+      print('[WS] connected (channel created)');
+
       _sub = _ch!.stream.listen(
         (event) {
-          // print('WS <- $event');
+          // 서버로부터의 수신이 필요하면 여기서 처리
+          // print('[WS] <= $event');
         },
         onDone: _scheduleReconnect,
-        onError: (e, st) => _scheduleReconnect(),
+        onError: (e, st) {
+          print('[WS] error: $e');
+          _scheduleReconnect();
+        },
         cancelOnError: true,
       );
 
@@ -126,16 +162,19 @@ class LocationSocketService {
         } catch (_) {}
       });
 
-      // 연결 직후: 홈 진입 1회 전송 예약이 있다면 바로 시도
-      // (좌표가 이미 준비돼 있으면 즉시 전송됨)
+      // 위치: 연결 직후 예약된 1회 전송 수행
       Future.microtask(_trySendEnterNow);
 
-      // 1분 주기 전송 시작
-      _periodicTimer?.cancel();
-      _periodicTimer = Timer.periodic(_periodicInterval, (_) {
+      // 위치: 1분 주기 전송 시작
+      _locationPeriodicTimer?.cancel();
+      _locationPeriodicTimer = Timer.periodic(_locationPeriodicInterval, (_) {
         sendLatestNow();
       });
-    } catch (_) {
+
+      // ✅ 건강: 자동 주기 전송은 기본 OFF.
+      // 필요하면 HealthPage에서 startHealthPeriodic() 호출해서 켜세요.
+    } catch (e) {
+      print('[WS] connect failed: $e');
       _scheduleReconnect();
     }
   }
@@ -146,18 +185,24 @@ class LocationSocketService {
   }
 
   Future<void> _disposeChannel() async {
+    print('[WS] _disposeChannel()');
+
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();
     _pingTimer = null;
 
-    _periodicTimer?.cancel();
-    _periodicTimer = null;
+    _locationPeriodicTimer?.cancel();
+    _locationPeriodicTimer = null;
+
+    _healthPeriodicTimer?.cancel();
+    _healthPeriodicTimer = null;
 
     await _sub?.cancel();
     _sub = null;
 
     try {
       await _ch?.sink.close(ws_status.normalClosure);
+      print('[WS] sink closed (normalClosure)');
     } catch (_) {}
     _ch = null;
   }
@@ -170,7 +215,9 @@ class LocationSocketService {
     });
   }
 
-  /// 실제 WS 전송
+  // ───────────────────────────────────────────
+  // 위치 전송
+  // ───────────────────────────────────────────
   void sendLocation({
     required double lat,
     required double lng,
@@ -179,6 +226,8 @@ class LocationSocketService {
   }) {
     final ch = _ch;
     if (ch == null) return;
+
+    print('[WS][LOC] try send (connected=${_ch != null}) lat=$lat lng=$lng');
 
     final msg = {
       'type': 'location',
@@ -193,7 +242,85 @@ class LocationSocketService {
 
     try {
       ch.sink.add(jsonEncode(msg));
-      // print("WS -> $msg");
-    } catch (_) {}
+      print('[WS][LOC] => $msg');
+    } catch (e) {
+      print('[WS][LOC] send failed: $e');
+    }
+  }
+
+  // ───────────────────────────────────────────
+  // ✅ 건강 전송 (스로틀 포함)
+  // ───────────────────────────────────────────
+
+  DateTime? _lastHealthSentAt;
+  bool _healthInFlight = false;
+  Duration _healthMinGap = const Duration(seconds: 3); // 최소 간격
+
+  /// 건강 데이터 즉시 1회 전송 (심박/걸음수)
+  Future<void> sendHealthNow() async {
+    final ch = _ch;
+    if (ch == null) return;
+
+    // 최소 간격 보장 (스로틀)
+    final now = DateTime.now();
+    if (_lastHealthSentAt != null &&
+        now.difference(_lastHealthSentAt!) < _healthMinGap) {
+      print('[HEALTH-WS] throttled (min gap ${_healthMinGap.inSeconds}s)');
+      return;
+    }
+
+    // 중복 실행 방지 (겹쳐 호출될 때)
+    if (_healthInFlight) {
+      print('[HEALTH-WS] skip (in-flight)');
+      return;
+    }
+
+    print('[HEALTH-WS] try send (connected=${_ch != null})');
+
+    _healthInFlight = true;
+    try {
+      final steps = await _health.getTodaySteps();
+      final hr = await _health.getCurrentHeartRate();
+
+      final msg = {
+        'type': 'health',
+        'payload': {
+          'heartRate': hr,
+          'step': steps,
+          // 기사 -> 서버 형식은 snake_case
+          'recorded_at': DateTime.now().toUtc().toIso8601String(),
+        },
+      };
+
+      ch.sink.add(jsonEncode(msg));
+      print('[HEALTH-WS] => $msg');
+
+      _lastHealthSentAt = DateTime.now();
+    } catch (e) {
+      print('[HEALTH-WS] send failed: $e');
+    } finally {
+      _healthInFlight = false;
+    }
+  }
+
+  /// (선택) 건강 데이터 주기 전송 시작 — HealthPage에서만 켜세요.
+  void startHealthPeriodic({Duration interval = const Duration(seconds: 30)}) {
+    _healthPeriodicInterval = interval;
+    _healthPeriodicTimer?.cancel();
+    _healthPeriodicTimer = Timer.periodic(_healthPeriodicInterval, (_) {
+      sendHealthNow();
+    });
+    print(
+      '[HEALTH-WS] start periodic every ${_healthPeriodicInterval.inSeconds}s',
+    );
+  }
+
+  /// (선택) 건강 데이터 주기 전송 중지
+  void stopHealthPeriodic() {
+    if (_healthPeriodicTimer != null) {
+      print('[HEALTH-WS] stop periodic');
+    }
+    _healthPeriodicTimer?.cancel();
+    _healthPeriodicTimer = null;
   }
 }
