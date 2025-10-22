@@ -3,7 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android") version "2.1.0"
-    id("com.google.gms.google-services") // ✅ 여기에만 있어야 함
+    id("com.google.gms.google-services")
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -35,7 +35,8 @@ android {
 
     defaultConfig {
         applicationId = "com.shimbox.app"
-        minSdk = 24
+        // ✅ Health Connect 요구사항
+        minSdk = 26
         targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -68,9 +69,7 @@ android {
 }
 
 repositories {
-    flatDir {
-        dirs("libs")
-    }
+    flatDir { dirs("libs") }
 }
 
 flutter {
@@ -79,22 +78,17 @@ flutter {
 
 dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.1.0")
-    implementation ("androidx.fragment:fragment:1.6.2")
+    implementation("androidx.fragment:fragment:1.6.2")
 
-
-    // ✅ Firebase BOM
+    // Firebase BOM & modules (기존 유지)
     implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
-
-    // ✅ Firebase modules
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-analytics")
     implementation("com.google.firebase:firebase-storage")
 
-    // ✅ TMap SDK AAR 연동
-    implementation(files("libs/tmap-sdk-2.4.aar"))
-    implementation(files("libs/vsm-tmap-sdk-v2-android-1.7.251.aar"))
-    implementation("com.google.android.material:material:1.11.0")
+    // ✅ Health Connect
+    implementation("androidx.health.connect:connect-client:1.2.0-alpha02")
 
-    implementation("com.google.android.gms:play-services-location:21.0.1")
-
+    // ✅ lifecycleScope 사용
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
 }

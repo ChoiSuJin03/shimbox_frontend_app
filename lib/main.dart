@@ -28,7 +28,6 @@ import 'pages/signup/signup_detail.dart';
 import 'pages/signup/signup_health.dart';
 import 'pages/signup/signup_waiting.dart';
 import 'pages/health/health_status.dart';
-import 'pages/wearable/wearable.dart';
 import 'pages/home/home.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
@@ -84,7 +83,6 @@ class MyApp extends StatelessWidget {
         GetPage(name: '/signup_waiting', page: () => SignupCompletePage()),
         GetPage(name: '/home', page: () => RootPage()),
         GetPage(name: '/health_status', page: () => HealthPage()),
-        GetPage(name: '/wearable', page: () => WearablePage()),
         // GetPage(name: '/main', page: () => HomePage()),
         GetPage(name: '/main', page: () => MainScaffold()),
         // GetPage(name: '/alarmPage', page: () => AlarmPage()),

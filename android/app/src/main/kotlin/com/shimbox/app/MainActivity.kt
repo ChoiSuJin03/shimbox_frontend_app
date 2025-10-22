@@ -1,134 +1,124 @@
 package com.shimbox.app
 
-import android.content.res.ColorStateList
-import android.graphics.Color
-import android.os.Bundle
-import android.view.Gravity
-import android.widget.Button
-import android.widget.FrameLayout
-import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
+// Health Connect
+import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
+import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+
 class MainActivity : FlutterFragmentActivity() {
+
+    // Health Connect client (lazy) — getSdkStatus 사용, 패키지명은 literal 로
+    private val healthClient: HealthConnectClient? by lazy {
+        val status = HealthConnectClient.getSdkStatus(
+            this,
+            "com.google.android.apps.healthdata" // DEFAULT_PROVIDER_PACKAGE_NAME 대신 literal
+        )
+        if (status == HealthConnectClient.SDK_AVAILABLE) {
+            HealthConnectClient.getOrCreate(this)
+        } else {
+            null
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        flutterEngine
-            .platformViewsController
-            .registry
-            .registerViewFactory("tmap-native-view", TMapViewFactory())
-
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "tmap-native-channel")
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "shimbox/health")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "moveToCurrentLocation" -> {
-                        TMapController.moveToCurrentLocation(this)
-                        result.success(null)
+                    "getSamsungStepsTotal" -> {
+                        val startMs = (call.argument<Number>("start") ?: 0L).toLong()
+                        val endMs = (call.argument<Number>("end") ?: 0L).toLong()
+                        if (healthClient == null) {
+                            result.success(0)
+                            return@setMethodCallHandler
+                        }
+                        lifecycleScope.launch {
+                            try {
+                                val total = getStepsTotalViaHealthConnect(startMs, endMs)
+                                result.success(total)
+                            } catch (_: Exception) {
+                                result.success(0)
+                            }
+                        }
                     }
-
-                    "drawOptimizedRoute" -> {
-                        TMapController.drawOptimizedRoute()
-                        result.success(null)
+                    "debugStepOrigins" -> {
+                        val startMs = (call.argument<Number>("start") ?: 0L).toLong()
+                        val endMs = (call.argument<Number>("end") ?: 0L).toLong()
+                        if (healthClient == null) {
+                            result.success("[]")
+                            return@setMethodCallHandler
+                        }
+                        lifecycleScope.launch {
+                            try {
+                                val json = debugStepOriginsJson(startMs, endMs)
+                                result.success(json)
+                            } catch (_: Exception) {
+                                result.success("[]")
+                            }
+                        }
                     }
-
-                    "showNativeButtons" -> {
-                        val padding = call.argument<Double>("bottomPadding") ?: 0.0
-                        showNativeButtons(padding.toFloat())
-                        result.success(null)
-                    }
-
-                    "hideNativeButtons" -> {
-                        hideNativeButtons()
-                        result.success(null)
-                    }
-
                     else -> result.notImplemented()
                 }
             }
     }
 
-    private fun showNativeButtons(bottomPadding: Float) {
-        val root = findViewById<FrameLayout>(android.R.id.content)
+    // ===== Health Connect helpers =====
 
-        // 🔽 Flutter 내부 FrameLayout 찾기
-        val flutterViewGroup = root.getChildAt(0) as? FrameLayout ?: return
+    private suspend fun getStepsTotalViaHealthConnect(startMs: Long, endMs: Long): Int {
+        val client = healthClient ?: return 0
+        val start = Instant.ofEpochMilli(startMs)
+        val end = Instant.ofEpochMilli(endMs)
 
-        if (flutterViewGroup.findViewWithTag<Button>("nativeBtnMyLocation") != null) return
-
-        val btnMyLocation = Button(this).apply {
-            tag = "nativeBtnMyLocation"
-            backgroundTintList = ColorStateList.valueOf(Color.parseColor("#1A73E9"))
-            foregroundTintList = ColorStateList.valueOf(Color.WHITE)
-            setCompoundDrawablesWithIntrinsicBounds(
-                ContextCompat.getDrawable(context, R.drawable.ic_re), null, null, null
+        val response = client.readRecords(
+            ReadRecordsRequest(
+                StepsRecord::class,
+                timeRangeFilter = TimeRangeFilter.between(start, end)
             )
-            text = ""
-            width = dpToPx(45)
-            height = dpToPx(45)
-            setOnClickListener {
-                TMapController.moveToCurrentLocation(this@MainActivity)
-            }
+        )
+
+        // 삼성 오리진 우선(없으면 전체)
+        val samsungOnly = response.records.filter { r ->
+            val p = r.metadata.dataOrigin.packageName.lowercase()
+            p.contains("samsung") || p.contains("shealth")
         }
+        val target = if (samsungOnly.isNotEmpty()) samsungOnly else response.records
 
-        val btnRoute = Button(this).apply {
-            tag = "nativeBtnRoute"
-            backgroundTintList = ColorStateList.valueOf(Color.parseColor("#1A73E9"))
-            foregroundTintList = ColorStateList.valueOf(Color.WHITE)
-            text = "최적 경로 보기"
-            setCompoundDrawablesWithIntrinsicBounds(
-                ContextCompat.getDrawable(context, R.drawable.ic_re), null, null, null
-            )
-            compoundDrawablePadding = dpToPx(8)
-            setOnClickListener {
-                TMapController.drawOptimizedRoute()
-            }
-        }
-
-        var bottomMargin = dpToPx((20 + bottomPadding).toInt())
-
-
-
-        val lpMyLoc = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.START
-            marginStart = dpToPx(16)
-            bottomMargin = bottomMargin
-        }
-
-        val lpRoute = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            marginEnd = dpToPx(16)
-            bottomMargin = bottomMargin
-        }
-
-        flutterViewGroup.addView(btnMyLocation, lpMyLoc)
-        flutterViewGroup.addView(btnRoute, lpRoute)
+        var sum = 0L
+        for (rec in target) sum += rec.count
+        return sum.toInt()
     }
 
+    private suspend fun debugStepOriginsJson(startMs: Long, endMs: Long): String {
+        val client = healthClient ?: return "[]"
+        val start = Instant.ofEpochMilli(startMs)
+        val end = Instant.ofEpochMilli(endMs)
 
+        val response = client.readRecords(
+            ReadRecordsRequest(
+                StepsRecord::class,
+                timeRangeFilter = TimeRangeFilter.between(start, end)
+            )
+        )
 
-    private fun hideNativeButtons() {
-        val root = findViewById<FrameLayout>(android.R.id.content)
-        val flutterViewGroup = root.getChildAt(0) as? FrameLayout ?: return
+        val items = response.records.map { r ->
+            val origin = r.metadata.dataOrigin.packageName
+            val from = r.startTime.atZone(ZoneId.systemDefault()).toLocalDateTime()
+            val to = r.endTime.atZone(ZoneId.systemDefault()).toLocalDateTime()
+            "$origin | $from ~ $to | count=${r.count}"
+        }.toSet().toList()
 
-        flutterViewGroup.findViewWithTag<Button>("nativeBtnMyLocation")?.let {
-            flutterViewGroup.removeView(it)
+        return items.joinToString(prefix = "[", postfix = "]") { s ->
+            "\"${s.replace("\"", "\\\"")}\""
         }
-        flutterViewGroup.findViewWithTag<Button>("nativeBtnRoute")?.let {
-            flutterViewGroup.removeView(it)
-        }
-    }
-
-
-    private fun dpToPx(dp: Int): Int {
-        val density = resources.displayMetrics.density
-        return (dp * density).toInt()
     }
 }

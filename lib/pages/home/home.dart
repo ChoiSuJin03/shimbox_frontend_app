@@ -1,3 +1,4 @@
+// lib/pages/home/home_page.dart
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'survey_module.dart';
@@ -9,11 +10,11 @@ import 'package:shimbox_app/models/alarm/alarm_item.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
-
 import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HomePage extends StatefulWidget {
@@ -41,35 +42,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     bottomController = Get.find<BottomNavController>();
 
-    // 지역값으로 WS 연결
     _connectLocationWsOnce();
-
-    // ✅ 홈 최초 진입: 즉시 1회 전송 예약
     LocationSocketService.instance.markHomeEntered();
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 앱이 백그라운드 -> 포그라운드(Resumed)로 돌아왔고 홈이 보이는 상태라면 1회 전송 예약
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state == AppLifecycleState.resumed) {
       LocationSocketService.instance.markHomeEntered();
-      fetchDeliverySummary(); // ✅ 복귀 시 요약 갱신
+      if (!LocationSocketService.instance.isConnected) {
+        await _connectLocationWsOnce();
+      }
+      fetchDeliverySummary();
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버 (빌드 컨텍스트 확보 후)
     LocationSocketService.instance.markHomeEntered();
-    fetchDeliverySummary(); // ✅ 화면 다시 보일 때도 갱신
+    fetchDeliverySummary();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
-    LocationSocketService.instance.disconnect();
     super.dispose();
   }
 
@@ -116,6 +114,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               (a, b) => (a['name'] as String).compareTo(b['name'] as String),
             );
 
+      if (!mounted) return;
       setState(() {
         deliveryAreas = areas;
         totalDeliveries = total;
@@ -171,7 +170,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return const Color(0xFF747474);
   }
 
-  // ✅ 진행중 판정 완화: 완료가 전체보다 적으면 진행중(완료 0이어도 시작됐다고 가정하여 초록)
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -198,9 +196,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (region.isEmpty && deliveryAreas.isNotEmpty) {
       region = _extractGu(deliveryAreas.first['name']?.toString());
     }
-
     if (region.isEmpty) region = '성북구';
 
+    print('[HOME] connect WS with region="$region"');
     await LocationSocketService.instance.connect(region: region);
   }
 
@@ -252,7 +250,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // ⬅️ 왼쪽 묶음을 Expanded로 감싸고, 내부 Column에도 폭 제약 전달
                       Expanded(
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -266,7 +263,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ),
                             ),
                             const SizedBox(width: 10),
-                            // Column에 확실히 width 제약 전달
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -282,8 +278,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   Row(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
-                                    mainAxisSize:
-                                        MainAxisSize.min, // shrink-wrap
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
                                       SvgPicture.asset(
                                         'assets/images/home/marker.svg',
@@ -292,7 +287,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         color: Colors.grey,
                                       ),
                                       const SizedBox(width: 5),
-                                      // 기존 Flexible(...) 안의 Obx 교체
                                       Flexible(
                                         fit: FlexFit.loose,
                                         child: Obx(() {
@@ -329,7 +323,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                               color: Colors.grey,
                                               fontSize: 13,
                                             ),
-                                            softWrap: true, // ✅ 전체 줄바꿈 허용
+                                            softWrap: true,
                                           );
                                         }),
                                       ),
@@ -372,19 +366,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
                         if (_currentPage == 0) {
+                          // ▶ 출근
+                          final pos = LocationController.to.currentLatLng.value;
                           final success =
-                              await ApiService.updateAttendanceStatus("출근");
+                              await ApiService.updateAttendanceStatus(
+                                "출근",
+                                latitude: pos?.latitude,
+                                longitude: pos?.longitude,
+                              );
                           print('🔁 출근 요청 결과: $success');
+
                           if (success) {
                             bottomController.isCheckedIn.value = true;
                             bottomController.checkInTime.value = time;
                             bottomController.isCheckedOut.value = false;
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('출근 상태 변경 실패')),
+
+                            // HealthPage fallback용 시작시각 저장
+                            UserData.workStart = now;
+                            UserData.workEnd = null;
+
+                            // 로컬에도 저장
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.setString(
+                              'work_start_iso',
+                              now.toIso8601String(),
                             );
+                            await prefs.remove('work_end_iso');
+
+                            // HealthPage가 떠 있을 때를 대비해 1회 전송
+                            LocationSocketService.instance.markHomeEntered();
+
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('출근이 등록되었습니다.')),
+                              );
+                            }
+                          } else {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('출근 상태 변경 실패')),
+                              );
+                            }
                           }
                         } else {
+                          // ▶ 퇴근(설문 먼저)
                           if (bottomController.isCheckedIn.value) {
                             setState(() => showSurvey = true);
                           }
@@ -658,7 +683,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
                               if (changed == true) {
-                                await fetchDeliverySummary(); // ✅ 상세 변경 반영
+                                await fetchDeliverySummary(); // 상세 변경 반영
                               }
                             },
                           ),
@@ -671,20 +696,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         ),
+
         if (showSurvey)
           SurveyModule(
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
-              // (선택) 더미 건강데이터는 실패해도 설문/퇴근은 진행
-              // final dummySuccess = await ApiService.createDummyHealthRecord();
-              // if (!dummySuccess && context.mounted) {
-              //   ScaffoldMessenger.of(context).showSnackBar(
-              //     const SnackBar(content: Text('건강 데이터 생성 실패 (설문은 계속 진행)')),
-              //   );
-              // }
-
-              // ✅ submitHealthSurvey는 문자열 3개만!
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
                 finish2: finish2,
@@ -700,7 +717,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 return;
               }
 
-              // ✅ 시간 포맷 수정 (toStringAsFixed 제거)
               final now = DateTime.now();
               final time =
                   '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
@@ -714,6 +730,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 }
                 return;
               }
+
+              // 종료시각 로컬/메모리에 저장
+              UserData.workEnd = now;
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('work_end_iso', now.toIso8601String());
 
               bottomController.isCheckedOut.value = true;
               bottomController.checkOutTime.value = time;

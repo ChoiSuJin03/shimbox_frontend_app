@@ -1,3 +1,4 @@
+// lib/utils/api_service.dart
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -8,11 +9,11 @@ import '../models/signup_data.dart';
 import '../models/login_data.dart';
 import '../models/login_response.dart';
 import '../models/test_user_data.dart' as localUser;
+import '../models/weekly_work_stats.dart';
 
 class ApiService {
   static const String baseUrl = 'http://116.39.208.72:26443';
 
-  // 서버가 허용하는 상태는 한글만: [배송대기, 배송시작, 배송완료]
   static const Map<String, String> _STATUS_TO_KOR = {
     '배송대기': '배송대기',
     '배송시작': '배송시작',
@@ -29,7 +30,7 @@ class ApiService {
   };
   static String _normalizeStatus(String status) {
     final s = status.trim();
-    return _STATUS_TO_KOR[s] ?? s; // 모르면 그대로
+    return _STATUS_TO_KOR[s] ?? s;
   }
 
   static String? _fallback(String? v) {
@@ -87,7 +88,7 @@ class ApiService {
     return loginResponse;
   }
 
-  // -------------------- 파일 업로드(면허증 예시) --------------------
+  // -------------------- 파일 업로드 --------------------
   static Future<String?> uploadLicenseImage(File file) async {
     final url = Uri.parse('$baseUrl/api/v1/upload/license');
     final request = http.MultipartRequest('POST', url)
@@ -104,7 +105,7 @@ class ApiService {
     }
   }
 
-  // -------------------- 배송 관련 (이미지/상태) --------------------
+  // -------------------- 배송 관련 --------------------
   static Future<bool> sendDeliveryImage({
     required int productId,
     required String imageUrl,
@@ -156,7 +157,6 @@ class ApiService {
         if (latitude != null) "latitude": latitude,
         if (longitude != null) "longitude": longitude,
         if (_fallback(addressShort) != null) "addressShort": addressShort,
-        // region은 비우지 않도록 기본값
         "region": _fallback(region) ?? '미지정',
         if (_fallback(imageUrl) != null) "imageUrl": imageUrl,
       };
@@ -190,7 +190,7 @@ class ApiService {
     }
   }
 
-  // -------------------- 공통 GET/PATCH (캐시 무효화) --------------------
+  // -------------------- 공통 GET/PATCH --------------------
   static Future<Map<String, dynamic>> get(String endpoint) async {
     final sep = endpoint.contains('?') ? '&' : '?';
     final url = Uri.parse(
@@ -239,7 +239,6 @@ class ApiService {
   static Future<List<Map<String, dynamic>>> fetchDeliverySummary() async {
     final response = await get('/api/v1/driver/summary');
 
-    // 상태코드 가드
     final sc = response['statusCode'] ?? response['status'] ?? 500;
     if (sc != 200) {
       throw Exception(response['message'] ?? '배송 정보를 불러올 수 없습니다.');
@@ -248,7 +247,6 @@ class ApiService {
     final raw = response['data'];
     if (raw is! List) return const [];
 
-    // 유틸
     String _clean(Object? v) {
       final s = (v?.toString() ?? '').trim();
       if (s.isEmpty) return '';
@@ -281,7 +279,6 @@ class ApiService {
     for (final e in raw) {
       if (e is! Map) continue;
 
-      // 주소/상세주소 키 후보에서 안전 추출
       final address = _firstNonEmpty(e, [
         'address',
         'shippingLocation',
@@ -297,7 +294,6 @@ class ApiService {
         'subAddress',
       ]);
 
-      // ✅ dong은 detailAddress에서 우선 추출, 없으면 address에서 보조
       final dong =
           _extractDongFromText(detailAddress) ??
           _extractDongFromText(address) ??
@@ -305,15 +301,13 @@ class ApiService {
           _extractDongFromText(_clean(e['buildingDong'])) ??
           _extractDongFromText(_clean(e['building']));
 
-      // ✅ 원본 행을 String 키로만 새 맵에 복사
       final Map<String, dynamic> row = {};
       (e as Map).forEach((k, v) => row[k.toString()] = v);
 
-      // ✅ 정규화 키 세팅
       row['address'] = address;
-      row['detailAddress'] = detailAddress; // 원본 키 유지
-      row['detail_address'] = detailAddress; // snake_case도 유지
-      row['detail'] = detailAddress; // 🔥 모달/그룹핑이 읽는 키 (핵심)
+      row['detailAddress'] = detailAddress;
+      row['detail_address'] = detailAddress;
+      row['detail'] = detailAddress;
       if (dong != null) row['dong'] = dong;
 
       normalized.add(row);
@@ -322,15 +316,14 @@ class ApiService {
     if (normalized.isNotEmpty) {
       debugPrint('🧩 summary normalized keys: ${normalized.first.keys}');
       debugPrint(
-        '🧩 sample detail/dong: '
-        'detail="${normalized.first['detail']}", dong="${normalized.first['dong']}"',
+        '🧩 sample detail/dong: detail="${normalized.first['detail']}", dong="${normalized.first['dong']}"',
       );
     }
 
     return normalized;
   }
 
-  // (옵션) 건강 데이터 더미
+  // -------------------- 건강 데이터 --------------------
   static Future<bool> createDummyHealthRecord() async {
     try {
       final step = localUser.UserData.stepCount ?? 0;
@@ -373,8 +366,6 @@ class ApiService {
   }
 
   // -------------------- 근태(출근/퇴근) --------------------
-  /// 출근/퇴근 상태 업데이트
-  /// status: "출근" 또는 "퇴근"
   static Future<bool> updateAttendanceStatus(
     String status, {
     double? latitude,
@@ -383,7 +374,7 @@ class ApiService {
     final url = Uri.parse('$baseUrl/api/v1/driver/attendance');
     try {
       final body = <String, dynamic>{
-        'status': status.trim(), // "출근" | "퇴근"
+        'status': status.trim(),
         if (latitude != null) 'latitude': latitude,
         if (longitude != null) 'longitude': longitude,
       };
@@ -417,17 +408,11 @@ class ApiService {
     }
   }
 
-  // -------------------- 건강 설문(자가체크) --------------------
-  /// home.dart에서 넘기는 파라미터 이름을 그대로 지원합니다.
-  /// - finish1/finish2/finish3: 체크박스/라디오 같은 완료 항목(불린/정수/문자 모두 허용)
-  /// - step: 걸음 수
-  /// - heartRate: 심박수
-  /// - conditionStatus: 컨디션(문자)
-  // -------------------- 건강 설문(퇴근 전 설문) --------------------
+  // -------------------- 건강 설문 --------------------
   static Future<bool> submitHealthSurvey({
-    required String finish1, // ex) '적었다' | '비슷했다' | '많았다'
-    required String finish2, // ex) '전혀 아니다' | '약간 그렇다' | '매우 그렇다'
-    required String finish3, // ex) '적게' | '평소대로' | '더 많이'
+    required String finish1,
+    required String finish2,
+    required String finish3,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/health/survey');
 
@@ -454,7 +439,6 @@ class ApiService {
             jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
       } catch (_) {}
 
-      // HTTP 레벨 먼저 체크
       if (res.statusCode != 200) {
         debugPrint(
           '❌ submitHealthSurvey HTTP 실패: ${res.statusCode} ${res.body}',
@@ -462,7 +446,6 @@ class ApiService {
         return false;
       }
 
-      // 비즈니스 레벨(statusCode) 체크
       final scRaw = decoded?['statusCode'];
       final sc =
           (scRaw is num)
@@ -483,5 +466,15 @@ class ApiService {
       debugPrint('🔥 submitHealthSurvey 예외: $e');
       return false;
     }
+  }
+
+  // -------------------- 주간 근무 통계 --------------------
+  static Future<WeeklyWorkStats> fetchWeeklyWorkStats() async {
+    final resp = await get('/api/v1/driver/my/weekly-stats');
+    final sc = resp['statusCode'] ?? resp['status'] ?? 200;
+    if (!(sc == 0 || sc == 200)) {
+      throw Exception(resp['message'] ?? '근무 통계를 불러올 수 없습니다.');
+    }
+    return WeeklyWorkStats.fromResponse(resp);
   }
 }

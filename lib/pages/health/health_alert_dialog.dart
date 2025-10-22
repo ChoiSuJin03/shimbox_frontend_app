@@ -9,6 +9,7 @@ class HealthAlertDialog {
     String subtitle = '무리하지 마시고 휴식을 권장합니다.',
     String warningIconPath = 'assets/images/icons/warning.svg',
     double width = 340,
+    Color warningColor = const Color(0xFFEE404C), // ★ 추가: 등급별 색상 지정
   }) async {
     return showDialog(
       context: context,
@@ -39,8 +40,8 @@ class HealthAlertDialog {
                         warningIconPath,
                         width: 60,
                         height: 40,
-                        theme: const SvgTheme(
-                          currentColor: Color(0xFFEE404C), // 삼각형만 빨강으로
+                        theme: SvgTheme(
+                          currentColor: warningColor, // ★ 등급별 색상 반영
                         ),
                       ),
 
@@ -49,7 +50,7 @@ class HealthAlertDialog {
                       Text(
                         title,
                         style: const TextStyle(
-                          fontSize: 18,
+                          fontSize: 16,
                           fontWeight: FontWeight.w800,
                           height: 1.35,
                         ),
