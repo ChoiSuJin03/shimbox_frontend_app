@@ -10,11 +10,11 @@ import 'package:shimbox_app/models/alarm/alarm_item.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimbox_app/controllers/bottom_nav_controller.dart';
 import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
-
 import 'package:shimbox_app/services/location_socket_service.dart';
 
 class HomePage extends StatefulWidget {
@@ -42,25 +42,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     bottomController = Get.find<BottomNavController>();
 
-    // 지역값으로 WS 연결 (앱 시작 시 1회)
     _connectLocationWsOnce();
-
-    // ✅ 홈 최초 진입: 위치 즉시 1회 전송 예약
     LocationSocketService.instance.markHomeEntered();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state == AppLifecycleState.resumed) {
-      // 홈이 다시 보이면 즉시 1회 전송
       LocationSocketService.instance.markHomeEntered();
-
-      // ✅ 혹시 끊겨 있으면 재연결 보강
       if (!LocationSocketService.instance.isConnected) {
         await _connectLocationWsOnce();
       }
-
-      // 복귀 시 요약 갱신
       fetchDeliverySummary();
     }
   }
@@ -68,17 +60,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // 네비게이션으로 홈으로 '다시' 들어오는 경우도 커버
     LocationSocketService.instance.markHomeEntered();
-    fetchDeliverySummary(); // 화면 다시 보일 때도 갱신
+    fetchDeliverySummary();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
-    // ❌ 여기서 disconnect() 하지 마세요. (앱 전역에서 WS 유지)
-    // LocationSocketService.instance.disconnect();
     super.dispose();
   }
 
@@ -181,7 +170,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return const Color(0xFF747474);
   }
 
-  // 진행중 판정: 완료가 전체보다 적으면 진행중
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -378,13 +366,41 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
                         if (_currentPage == 0) {
+                          // ▶ 출근
+                          final pos = LocationController.to.currentLatLng.value;
                           final success =
-                              await ApiService.updateAttendanceStatus("출근");
+                              await ApiService.updateAttendanceStatus(
+                                "출근",
+                                latitude: pos?.latitude,
+                                longitude: pos?.longitude,
+                              );
                           print('🔁 출근 요청 결과: $success');
+
                           if (success) {
                             bottomController.isCheckedIn.value = true;
                             bottomController.checkInTime.value = time;
                             bottomController.isCheckedOut.value = false;
+
+                            // HealthPage fallback용 시작시각 저장
+                            UserData.workStart = now;
+                            UserData.workEnd = null;
+
+                            // 로컬에도 저장
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.setString(
+                              'work_start_iso',
+                              now.toIso8601String(),
+                            );
+                            await prefs.remove('work_end_iso');
+
+                            // HealthPage가 떠 있을 때를 대비해 1회 전송
+                            LocationSocketService.instance.markHomeEntered();
+
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('출근이 등록되었습니다.')),
+                              );
+                            }
                           } else {
                             if (context.mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
@@ -393,6 +409,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             }
                           }
                         } else {
+                          // ▶ 퇴근(설문 먼저)
                           if (bottomController.isCheckedIn.value) {
                             setState(() => showSurvey = true);
                           }
@@ -666,7 +683,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
                               if (changed == true) {
-                                await fetchDeliverySummary(); // ✅ 상세 변경 반영
+                                await fetchDeliverySummary(); // 상세 변경 반영
                               }
                             },
                           ),
@@ -679,12 +696,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         ),
+
         if (showSurvey)
           SurveyModule(
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
-              // ✅ submitHealthSurvey는 문자열 3개만!
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
                 finish2: finish2,
@@ -713,6 +730,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 }
                 return;
               }
+
+              // 종료시각 로컬/메모리에 저장
+              UserData.workEnd = now;
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('work_end_iso', now.toIso8601String());
 
               bottomController.isCheckedOut.value = true;
               bottomController.checkOutTime.value = time;

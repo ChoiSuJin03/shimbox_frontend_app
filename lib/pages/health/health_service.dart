@@ -1,3 +1,4 @@
+// lib/pages/health/health_service.dart
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:health/health.dart';
@@ -51,7 +52,7 @@ class HealthService {
     }
   }
 
-  // 걸음수 (삼성 오리진 우선, 없으면 전체 합산)
+  // 걸음수 (삼성 오리진 우선, 없으면 전체 합산) — "하루 전체" 유지
   Future<int> getTodaySteps() async {
     final now = DateTime.now();
     final start = DateTime(now.year, now.month, now.day);
@@ -92,10 +93,10 @@ class HealthService {
     return out;
   }
 
-  // 심박수: flutter-health 플러그인으로 최근 1개
+  // 심박수: 최근 5분만 조회해서 가장 최근 1개 값 반환 (플러그인 최신 API 없이도 동작)
   Future<int> getCurrentHeartRate() async {
     final now = DateTime.now();
-    final start = now.subtract(const Duration(hours: 1));
+    final start = now.subtract(const Duration(minutes: 5));
 
     var data = await _health.getHealthDataFromTypes(
       types: const [HealthDataType.HEART_RATE],
