@@ -10,10 +10,12 @@ dependencies:
   flutter:
     sdk: flutter
 
+  share_plus: ^7.2.2
+
   health: ^13.1.4
 
   # ▶ WebSocket
-  web_socket_channel: ^2.4.4         # ← 오타(2.4.04) 수정
+  web_socket_channel: ^2.4.4 # ← 오타(2.4.04) 수정
   connectivity_plus: ^6.0.5
 
   # db
@@ -28,7 +30,7 @@ dependencies:
 
   # 추가
   permission_handler: ^12.0.0+1
-  shared_preferences: ^2.3.0         # ← 본 deps에만 유지
+  shared_preferences: ^2.3.0 # ← 본 deps에만 유지
 
   # Google Fit
   googleapis: ^14.0.0
