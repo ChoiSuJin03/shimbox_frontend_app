@@ -105,38 +105,20 @@ class ApiService {
     }
   }
 
-  // -------------------- 배송 관련 --------------------
+  // -------------------- 배송 이미지 업로드 --------------------
+  // ✅ 요구사항: 서버로 이미지 URL을 보내지 않음. 이 메서드는 no-op으로 성공 처리.
   static Future<bool> sendDeliveryImage({
     required int productId,
     required String imageUrl,
   }) async {
-    final url = Uri.parse('$baseUrl/api/v1/driver/delivery/image');
-    try {
-      final res = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${localUser.UserData.token}',
-        },
-        body: jsonEncode({'productId': productId, 'imageUrl': imageUrl}),
-      );
-      debugPrint('📥 sendDeliveryImage: ${res.statusCode} ${res.body}');
-      if (res.statusCode != 200) return false;
-
-      try {
-        final decoded = jsonDecode(utf8.decode(res.bodyBytes));
-        if (decoded is Map<String, dynamic>) {
-          final sc = decoded['statusCode'] ?? 200;
-          return sc == 0 || sc == 200;
-        }
-      } catch (_) {}
-      return true;
-    } catch (e) {
-      debugPrint('❌ sendDeliveryImage 실패: $e');
-      return false;
-    }
+    debugPrint(
+      '📵 [IMG] sendDeliveryImage disabled by client policy. productId=$productId, imageUrl=$imageUrl',
+    );
+    return true;
   }
 
+  // lib/utils/api_service.dart (발췌)
+  // PATCH /api/v1/driver/product/status
   static Future<bool> updateProductStatus(
     int productId,
     String status, {
@@ -145,26 +127,28 @@ class ApiService {
     double? longitude,
     String? addressShort,
     String? region,
-    String? imageUrl,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/product/status');
     try {
+      // 스웨거 예시가 한글 상태이므로 한글로 정규화
       final normalized = _normalizeStatus(status);
+
+      // ✅ 스웨거 스펙 그대로: imageUrl 없음, camelCase 사용
       final body = <String, dynamic>{
-        "productId": productId,
-        "status": normalized,
-        if (_fallback(location) != null) "location": location,
-        if (latitude != null) "latitude": latitude,
-        if (longitude != null) "longitude": longitude,
-        if (_fallback(addressShort) != null) "addressShort": addressShort,
-        "region": _fallback(region) ?? '미지정',
-        if (_fallback(imageUrl) != null) "imageUrl": imageUrl,
+        'productId': productId,
+        'status': normalized,
+        if (_fallback(location) != null) 'location': location,
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
+        if (_fallback(addressShort) != null) 'addressShort': addressShort,
+        if (_fallback(region) != null) 'region': region,
       };
 
       final res = await http.patch(
         url,
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Accept': '*/*',
           'Authorization': 'Bearer ${localUser.UserData.token}',
         },
         body: jsonEncode(body),
@@ -174,14 +158,30 @@ class ApiService {
       try {
         decoded =
             jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
-      } catch (_) {}
+      } catch (_) {
+        // 응답이 비JSON이어도 HTTP 2xx면 성공 처리
+      }
 
-      final sc = decoded?['statusCode'] ?? res.statusCode;
-      final ok = sc == 0 || sc == 200;
+      // 스웨거: statusCode==0 이면 OK. (백엔드가 200만 주는 경우도 고려)
+      final statusCodeField = decoded?['statusCode'];
+      final int? sc =
+          (statusCodeField is num)
+              ? statusCodeField.toInt()
+              : int.tryParse('$statusCodeField');
+
+      final ok =
+          (sc == null && res.statusCode >= 200 && res.statusCode < 300) ||
+          sc == 0 ||
+          sc == 200;
+
       if (!ok) {
-        debugPrint('❌ updateProductStatus 실패: $sc, ${res.body} (req=$body)');
+        debugPrint(
+          '❌ updateProductStatus 실패: http=${res.statusCode}, api=$sc, body=${res.body} (req=$body)',
+        );
       } else {
-        debugPrint('✅ updateProductStatus 성공: $body');
+        debugPrint(
+          '✅ updateProductStatus 성공: http=${res.statusCode}, api=$sc, req=$body, resp=${res.body}',
+        );
       }
       return ok;
     } catch (e) {
@@ -191,26 +191,64 @@ class ApiService {
   }
 
   // -------------------- 공통 GET/PATCH --------------------
+  // ✅ 교체: ApiService.get()
   static Future<Map<String, dynamic>> get(String endpoint) async {
     final sep = endpoint.contains('?') ? '&' : '?';
     final url = Uri.parse(
       '$baseUrl$endpoint${sep}_ts=${DateTime.now().millisecondsSinceEpoch}',
     );
     try {
-      final res = await http.get(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${localUser.UserData.token}',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-        },
-      );
-      return jsonDecode(utf8.decode(res.bodyBytes));
+      final res = await http
+          .get(
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': '*/*', // 🔧 swagger 표기 맞춤
+              'Authorization': 'Bearer ${localUser.UserData.token}',
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache',
+              'Expires': '0',
+            },
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final raw = utf8.decode(res.bodyBytes);
+      final body = raw.trim();
+
+      // ✅ 절대로 throw 하지 말고 상태/메시지와 함께 반환
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        Map<String, dynamic>? decoded;
+        try {
+          decoded =
+              body.isEmpty ? null : jsonDecode(body) as Map<String, dynamic>;
+        } catch (_) {}
+
+        return {
+          'statusCode': res.statusCode,
+          'message':
+              decoded?['message'] ??
+              decoded?['error'] ??
+              (body.isEmpty ? 'empty body' : body),
+          'data': decoded?['data'],
+        };
+      }
+
+      if (body.isEmpty) {
+        return {
+          'statusCode': res.statusCode,
+          'data': null,
+          'message': 'empty body',
+        };
+      }
+
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is List) return {'statusCode': 200, 'data': decoded};
+      return {'statusCode': 200, 'raw': decoded};
     } catch (e) {
-      debugPrint('🔥 GET 실패 [$endpoint]: $e');
-      rethrow;
+      debugPrint('🔥 GET 예외 [$endpoint]: $e');
+      // ✅ 네트워크 에러도 throw 대신 구조화
+      return {'statusCode': 599, 'message': e.toString(), 'data': null};
     }
   }
 
@@ -240,8 +278,17 @@ class ApiService {
     final response = await get('/api/v1/driver/summary');
 
     final sc = response['statusCode'] ?? response['status'] ?? 500;
+
+    // 🔐 인증/권한 문제면 UI가 안내 문구를 띄울 수 있게 빈 리스트로 넘기고 로그만 남김
+    if (sc == 401 || sc == 403) {
+      debugPrint('🔐 summary 인증/권한 실패(status=$sc): ${response['message']}');
+      return const [];
+    }
+
     if (sc != 200) {
-      throw Exception(response['message'] ?? '배송 정보를 불러올 수 없습니다.');
+      // 그 외 서버 오류 등도 UI 죽이지 말고 빈 리스트
+      debugPrint('❌ summary 오류(status=$sc): ${response['message']}');
+      return const [];
     }
 
     final raw = response['data'];
@@ -249,8 +296,7 @@ class ApiService {
 
     String _clean(Object? v) {
       final s = (v?.toString() ?? '').trim();
-      if (s.isEmpty) return '';
-      if (s.toLowerCase() == 'null') return '';
+      if (s.isEmpty || s.toLowerCase() == 'null') return '';
       return s;
     }
 
@@ -275,7 +321,6 @@ class ApiService {
     }
 
     final List<Map<String, dynamic>> normalized = [];
-
     for (final e in raw) {
       if (e is! Map) continue;
 
@@ -301,9 +346,8 @@ class ApiService {
           _extractDongFromText(_clean(e['buildingDong'])) ??
           _extractDongFromText(_clean(e['building']));
 
-      final Map<String, dynamic> row = {};
+      final row = <String, dynamic>{};
       (e as Map).forEach((k, v) => row[k.toString()] = v);
-
       row['address'] = address;
       row['detailAddress'] = detailAddress;
       row['detail_address'] = detailAddress;
@@ -319,7 +363,6 @@ class ApiService {
         '🧩 sample detail/dong: detail="${normalized.first['detail']}", dong="${normalized.first['dong']}"',
       );
     }
-
     return normalized;
   }
 

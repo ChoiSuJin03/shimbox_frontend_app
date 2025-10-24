@@ -165,15 +165,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Color _areaStatusColor(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    if (total > 0 && done >= total) return const Color(0xFF61D5AB);
-    if (done == 0) return Colors.grey;
-    return const Color(0xFF747474);
+    if (total > 0 && done >= total) return const Color(0xFF61D5AB); // 완료
+    if (done == 0) return Colors.grey; // 미시작
+    return const Color(0xFF747474); // 진행중
+  }
+
+  // ✅ 상태 분리: 미시작 / 진행중 / 완료
+  bool _isAreaNotStarted(Map<String, dynamic> area) {
+    final int total = (area['total'] ?? 0);
+    final int done = (area['completed'] ?? 0);
+    return total > 0 && done == 0;
   }
 
   bool _isAreaInProgress(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    return total > 0 && done < total;
+    return total > 0 && done > 0 && done < total;
   }
 
   bool _isAreaCompleted(Map<String, dynamic> area) {
@@ -623,6 +630,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       itemBuilder: (context, index) {
                         final area = deliveryAreas[index];
 
+                        // ✅ 상태 계산
+                        final bool notStarted = _isAreaNotStarted(area);
                         final bool inProgress = _isAreaInProgress(area);
                         final bool completed = _isAreaCompleted(area);
 
@@ -639,6 +648,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               width: 48,
                               height: 48,
                               decoration: BoxDecoration(
+                                // 진행중(배경 초록) / 그 외(F4F4F4)
                                 color:
                                     inProgress
                                         ? const Color(0xFF61D5AB)
@@ -650,12 +660,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   'assets/images/home/marker.svg',
                                   width: 24,
                                   height: 24,
+                                  // 완료: #61D5AB / 진행중: #F4F4F4 / 미시작: 검정
                                   color:
-                                      inProgress
-                                          ? Colors.white
-                                          : (completed
-                                              ? const Color(0xFF61D5AB)
-                                              : const Color(0xFF171412)),
+                                      completed
+                                          ? const Color(0xFF61D5AB)
+                                          : inProgress
+                                          ? const Color(0xFFF4F4F4)
+                                          : const Color(0xFF171412),
                                 ),
                               ),
                             ),

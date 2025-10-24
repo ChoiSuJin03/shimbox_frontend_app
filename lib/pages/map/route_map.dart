@@ -379,8 +379,12 @@ class _MapPageState extends State<MapPage> {
           final y = double.tryParse(docs[0]['y'].toString());
           if (x != null && y != null) return LatLng(y, x);
         }
+      } else {
+        debugPrint('❌ Geocode address fail: ${res.statusCode} ${res.body}');
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('❌ Geocode address error: $e');
+    }
     return null;
   }
 
@@ -400,8 +404,12 @@ class _MapPageState extends State<MapPage> {
           final y = double.tryParse(docs[0]['y'].toString());
           if (x != null && y != null) return LatLng(y, x);
         }
+      } else {
+        debugPrint('❌ Geocode keyword fail: ${res.statusCode} ${res.body}');
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('❌ Geocode keyword error: $e');
+    }
     return null;
   }
 
@@ -436,6 +444,7 @@ class _MapPageState extends State<MapPage> {
     int maxIter = 2000,
   }) {
     double total(List<LatLng> r) {
+      if (r.isEmpty) return 0;
       var sum = _haversine(start, r.first);
       for (var i = 0; i < r.length - 1; i++) {
         sum += _haversine(r[i], r[i + 1]);
@@ -477,24 +486,61 @@ class _MapPageState extends State<MapPage> {
     return _twoOptImprove(start, nn);
   }
 
+  // ===== 신규: 좌표 중복/초근접 제거 =====
+  List<LatLng> _dedupByRadius(List<LatLng> pts, {double epsMeters = 20}) {
+    final kept = <LatLng>[];
+    for (final p in pts) {
+      final near = kept.any((q) => _haversine(p, q) < epsMeters);
+      if (!near) kept.add(p);
+    }
+    return kept;
+  }
+
+  // ===== 신규: 좌표-순번 매칭을 거리기반으로 =====
+  int? _findIndexByNear(LatLng p, {double tolMeters = 10}) {
+    for (int i = 0; i < _nearestStopsWithLabel.length; i++) {
+      if (_haversine(p, _nearestStopsWithLabel[i].point) < tolMeters) return i;
+    }
+    return null;
+  }
+
+  // ===== Directions: GET → POST (JSON Body) =====
   Future<bool> _drawKakaoDrivingRoute({
     required LatLng origin,
     required LatLng destination,
     required List<LatLng> waypoints,
   }) async {
     try {
-      String fmt(LatLng p) => '${p.longitude},${p.latitude}';
-      final uri = Uri.https('apis-navi.kakaomobility.com', '/v1/directions', {
-        'origin': fmt(origin),
-        'destination': fmt(destination),
-        if (waypoints.isNotEmpty) 'waypoints': waypoints.map(fmt).join('|'),
-        'priority': 'RECOMMEND',
-      });
-      final res = await http.get(
-        uri,
-        headers: {'Authorization': 'KakaoAK $_kakaoRestKey'},
+      final uri = Uri.https(
+        'apis-navi.kakaomobility.com',
+        '/v1/waypoints/directions',
       );
-      if (res.statusCode != 200) return false;
+
+      Map<String, double> xy(LatLng p) => {'x': p.longitude, 'y': p.latitude};
+
+      final body = {
+        'origin': xy(origin),
+        'destination': xy(destination),
+        if (waypoints.isNotEmpty)
+          'waypoints': waypoints.map((p) => xy(p)).toList(),
+        'priority': 'TIME', // 도로 최단시간 기준 (RECOMMEND도 가능)
+        'alternatives': false,
+        'road_details': false,
+      };
+
+      final res = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'KakaoAK $_kakaoRestKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(body),
+      );
+
+      if (res.statusCode != 200) {
+        debugPrint('❌ Kakao directions fail: ${res.statusCode} ${res.body}');
+        return false;
+      }
 
       final data = jsonDecode(res.body);
       final routes = (data['routes'] as List?) ?? [];
@@ -524,7 +570,8 @@ class _MapPageState extends State<MapPage> {
         };
       });
       return true;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('❌ Directions exception: $e\n$st');
       return false;
     }
   }
@@ -537,23 +584,23 @@ class _MapPageState extends State<MapPage> {
       return;
     }
 
-    final stops = _nearestStops
-        .where((p) => _haversine(start, p) > 3.0)
+    // 시작점과 너무 가까운 포인트 제거(기존 3m → 25m로 강화)
+    var stops = _nearestStops
+        .where((p) => _haversine(start, p) > 25.0)
         .toList(growable: false);
+    // 좌표 중복/초근접 제거
+    stops = _dedupByRadius(stops, epsMeters: 20);
+
     final orderedPoints = _optimizeStops(start, stops);
 
+    // 순번 라벨링: 좌표완전일치 → 거리기반 매칭으로 교체
     final orderedStops = <_Stop>[];
     final used = <int>{};
     for (final p in orderedPoints) {
-      for (int i = 0; i < _nearestStopsWithLabel.length; i++) {
-        if (used.contains(i)) continue;
-        final s = _nearestStopsWithLabel[i];
-        if ((s.point.latitude - p.latitude).abs() < 1e-8 &&
-            (s.point.longitude - p.longitude).abs() < 1e-8) {
-          orderedStops.add(s);
-          used.add(i);
-          break;
-        }
+      final idx = _findIndexByNear(p, tolMeters: 10);
+      if (idx != null && !used.contains(idx)) {
+        orderedStops.add(_nearestStopsWithLabel[idx]);
+        used.add(idx);
       }
     }
 
@@ -581,7 +628,7 @@ class _MapPageState extends State<MapPage> {
     );
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('경로를 찾지 못했습니다. 좌표/키 설정을 확인하세요.')),
+        const SnackBar(content: Text('경로를 찾지 못했습니다. 좌표/키/파라미터를 확인하세요.')),
       );
     }
     await _refreshMarkers(keepStops: false);
