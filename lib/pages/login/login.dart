@@ -3,7 +3,8 @@ import 'package:shimbox_app/models/login_data.dart';
 import 'package:shimbox_app/models/login_response.dart' as model;
 import 'package:shimbox_app/utils/api_service.dart';
 import '../root/root.dart';
-import 'package:shimbox_app/models/test_user_data.dart'; // 🔄 정적 저장용 UserData
+import 'package:shimbox_app/models/test_user_data.dart';
+import 'package:shimbox_app/services/global_location_bootstrap.dart'; // ✅ 추가
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -29,13 +30,14 @@ class _LoginPageState extends State<LoginPage> {
       final userData = result.data;
 
       if (!userData.approved) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('❗승인되지 않은 계정입니다. 관리자에게 문의하세요.')),
         );
         return;
       }
 
-      // 승인된 사용자일 경우 정보 저장
+      // 승인된 사용자 저장
       UserData.name = userData.name;
       UserData.token = userData.accessToken;
       UserData.email = loginData.email;
@@ -44,11 +46,20 @@ class _LoginPageState extends State<LoginPage> {
       print('✅ 저장된 사용자 이름: ${UserData.name}');
       print('✅ 저장된 토큰: ${UserData.token}');
 
+      // ✅ 로그인 직후 전역 위치/WS 시작 (홈에 안 가도 위치 전송)
+      try {
+        await GlobalLocationBootstrap.instance.start();
+      } catch (e) {
+        debugPrint('GlobalLocationBootstrap start 실패: $e');
+      }
+
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (context) => RootPage()),
       );
     } else {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('❗계정이 존재하지 않거나 비밀번호가 틀렸습니다')),
       );
@@ -66,11 +77,8 @@ class _LoginPageState extends State<LoginPage> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // 로고
                 Image.asset('assets/images/logo.png', height: 55),
                 const SizedBox(height: 60),
-
-                // 아이디
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -92,8 +100,6 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
                 const SizedBox(height: 30),
-
-                // 비밀번호
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -116,31 +122,24 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
                 const SizedBox(height: 20),
-
-                // 링크
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Text(
+                  children: const [
+                    Text(
                       '아이디 찾기 | 비밀번호 찾기 | ',
                       style: TextStyle(fontSize: 13, color: Color(0xFFBDBDBD)),
                     ),
-                    GestureDetector(
-                      onTap: () => Navigator.pushNamed(context, '/start'),
-                      child: const Text(
-                        '회원가입',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFFBDBDBD),
-                          fontWeight: FontWeight.bold,
-                        ),
+                    Text(
+                      '회원가입',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFFBDBDBD),
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 70),
-
-                // 로그인 버튼
                 SizedBox(
                   width: double.infinity,
                   height: 55,

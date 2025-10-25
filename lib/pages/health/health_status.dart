@@ -1,4 +1,3 @@
-// lib/pages/health/health_page.dart
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -49,13 +48,14 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
 
   // ── 피로도(동적) ──────────────────────────────────────────────────
   double? _fatigue; // 0~1 score
-  String _fatigueLevel = '보통'; // 좋음/보통/주의/위험
-  Color _fatigueColorDyn = const Color(0xFF8EC5A8);
-  String _fatigueMessageDyn = '무리 없이 진행 중...';
+  String _fatigueLevel = '좋음'; // 좋음/경고/위험
+  Color _fatigueColorDyn = const Color(0xFF61D5AB); // green
+  String _fatigueMessageDyn =
+      '컨디션이 좋아요. 평소 페이스로 진행하세요.\n수분 보충과 가벼운 스트레칭을 이어가면 좋아요.';
 
-  // 더미 BMI (API 없어서 임시)
-  final int _dummyHeightCm = 180;
-  final int _dummyWeightKg = 80;
+  // ▲ BMI용 키/몸무게 (API로 로드)
+  int? _heightCm;
+  int? _weightKg;
 
   // 심박 중앙값용 히스토리(최근 N개)
   final List<int> _hrHistory = <int>[];
@@ -82,13 +82,12 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   Timer? _workTicker;
   static const _workTick = Duration(seconds: 10);
 
-  // 피로도 30분 주기 재계산 타이머
+  // ❌ 기존: 자동 UI 새로고침 10초 타이머 → 제거 (이벤트 기반으로 전환)
+  // Timer? _uiRefreshTicker;
+
+  // 피로도 10분 주기 재계산 타이머 (폴백/보강용)
   Timer? _fatigueTicker;
   static const _fatigueTick = Duration(minutes: 10);
-
-  // ── 자동 UI 새로고침 타이머 (걸음/심박/피로도) ─────────────────────
-  Timer? _uiRefreshTicker;
-  static const _uiRefreshTick = Duration(seconds: 10);
 
   // ── 피로도 알림/팝업 제어 ─────────────────────────────────────────
   String? _prevFatigueLevel; // 이전 등급 기억
@@ -99,17 +98,27 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   DateTime? _lastPopupAt;
   static const Duration _popupDebounce = Duration(minutes: 2);
 
+  // ★ (수정) 위험 상태 잠금
+  DateTime? _dangerLockedUntil;
+
+  // ── “이번 주 0분이면 초기화” 안전가드용 플래그 ─────────────────────
+  bool _emptyWeekSeenOnce = false;
+
+  // ★ 이벤트 구독
+  StreamSubscription<HealthSnapshot>? _healthSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _boot();
 
+    // 위치/소켓 주기 전송은 기존대로 (HealthPage에서는 건강만 조절)
     _startHealthStreaming();
     _startWorkTickerIfNeeded();
-    _startUiRefreshTicker(); // 자동 새로고침 시작
 
-    _startFatigueTicker(); // 피로도 자동 재계산 시작
+    // 폴백: 피로도는 10분마다 한 번 재평가 (서버/그래프 값 변화 대비)
+    _startFatigueTicker();
   }
 
   @override
@@ -117,22 +126,25 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _startHealthStreaming();
       _startWorkTickerIfNeeded();
-      _startUiRefreshTicker(); // 복귀 시 재개
-      _startFatigueTicker(); // 포그라운드 복귀 시 재개
+      _startFatigueTicker();
+      // 이벤트 기반이라 별도 UI 폴링은 필요 없음
+      _service.startChangePolling(interval: const Duration(seconds: 5));
     } else {
       _stopHealthStreaming();
       _stopWorkTicker();
-      _stopUiRefreshTicker(); // 백그라운드 시 정지
-      _stopFatigueTicker(); // 백그라운드 시 정지
+      _stopFatigueTicker();
+      _service.stopChangePolling();
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _healthSub?.cancel();
+    _service.stopChangePolling();
+
     _stopHealthStreaming();
     _stopWorkTicker();
-    _stopUiRefreshTicker();
     _stopFatigueTicker();
     super.dispose();
   }
@@ -140,7 +152,9 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   // ── 소켓 전송 제어 ────────────────────────────────────────────────
   void _startHealthStreaming() {
     if (!LocationSocketService.instance.isConnected) return;
+    // 피로도 최신값 포함해서 즉시 1회 송신
     LocationSocketService.instance.sendHealthNow();
+    // 주기 전송(30초)은 유지하거나 필요시 꺼도 됨
     LocationSocketService.instance.startHealthPeriodic(
       interval: const Duration(seconds: 30),
     );
@@ -164,6 +178,34 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       }
       _startWorkTickerIfNeeded();
     } catch (_) {}
+  }
+
+  // ── 드라이버 프로필 로드 (키/몸무게) ──────────────────────────────
+  Future<void> _loadDriverProfile() async {
+    try {
+      final driverId = UserData.driverId;
+      if (driverId == null) return;
+
+      final profile = await ApiService.fetchDriverProfile(driverId);
+      final data = profile.data;
+
+      final int? h =
+          data['height'] is int
+              ? data['height'] as int
+              : (data['height']?.toInt());
+      final int? w =
+          data['weight'] is int
+              ? data['weight'] as int
+              : (data['weight']?.toInt());
+
+      if (!mounted) return;
+      setState(() {
+        _heightCm = h;
+        _weightKg = w;
+      });
+    } catch (e) {
+      debugPrint('[Profile] failed to load height/weight: $e');
+    }
   }
 
   // ── 로컬 근무시간 가산 타이머 ─────────────────────────────────────
@@ -195,28 +237,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     });
   }
 
-  // ── 자동 새로고침 구현(조용히 갱신) ───────────────────────────────
-  void _startUiRefreshTicker() {
-    _uiRefreshTicker ??= Timer.periodic(
-      _uiRefreshTick,
-      (_) => _autoRefreshHealth(),
-    );
-  }
-
-  void _stopUiRefreshTicker() {
-    _uiRefreshTicker?.cancel();
-    _uiRefreshTicker = null;
-  }
-
-  Future<void> _autoRefreshHealth() async {
-    if (!_isHealthConnected || !mounted) return;
-    await _fetchStepCount(silent: true);
-    await _fetchHeartRate(silent: true);
-    await _sendHealthToServer();
-    await _computeAndRenderFatigue();
-  }
-
-  // ── 피로도 30분 주기 ─────────────────────────────────────────────
+  // ── 피로도 10분 주기 ─────────────────────────────────────────────
   void _startFatigueTicker() {
     _fatigueTicker ??= Timer.periodic(
       _fatigueTick,
@@ -230,19 +251,63 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     _fatigueTicker = null;
   }
 
-  // ── 부팅 시 데이터 로딩 ───────────────────────────────────────────
+  // ── 부팅 시 데이터 로딩 (호출 순서 조정) ──────────────────────────
   Future<void> _boot() async {
-    await _restoreLocalWorkSessionFromPrefs(); // ★ 로컬 세션 복구
+    await _restoreLocalWorkSessionFromPrefs();
+    await _loadDriverProfile();
     await _checkHealthConnection();
     await _maybeAutoPromptHealthConnect();
-    await _resetWorkSessionIfEmpty(); // 이번 주 0이면 로컬세션 초기화
+
+    // 표시값 먼저 확보
     await _fetchDeliveryCount(); // 오늘 건수 + 배달 그래프
-    await _fetchWeeklyWorkStats(); // 근무시간 + 근무 그래프
+    await _fetchWeeklyWorkStats(); // 근무시간 + 근무 그래프 (max(server, local))
+
+    // 마지막에 초기화 판단 (근무 중이면 패스, 연속 empty 확인)
+    await _resetWorkSessionIfEmpty();
+
+    // ✅ 이벤트 기반 구독 + (Observer 없으면) 가벼운 폴링 시작
+    _attachHealthChangeStream();
+  }
+
+  void _attachHealthChangeStream() {
+    _healthSub?.cancel();
+    _healthSub = _service.changes.listen((snap) async {
+      if (!mounted) return;
+
+      // 1) 상태 업데이트
+      setState(() {
+        _stepCountValue = snap.steps;
+        _stepCount = snap.steps > 0 ? snap.steps.toString() : '데이터 없음';
+        _lastStepUpdatedAt = snap.capturedAt;
+
+        _heartRateValue = snap.heartRate;
+        _heartRate = snap.heartRate > 0 ? '${snap.heartRate} bpm' : '데이터 없음';
+        _lastHeartUpdatedAt = snap.capturedAt;
+      });
+
+      // 2) 심박 히스토리/피로도
+      _pushHr(snap.heartRate);
+      await _computeAndRenderFatigue();
+
+      // 3) 서버/소켓 전송
+      await _sendHealthToServer();
+      if (LocationSocketService.instance.isConnected) {
+        await LocationSocketService.instance.sendHealthNow();
+      }
+    });
+
+    // Observer가 없으면 5초 간격 가벼운 폴링으로 변화 감지
+    _service.startChangePolling(interval: const Duration(seconds: 5));
   }
 
   /// 이번 주(月~金) 모든 일자 근무가 0분이면 로컬 세션 초기화
   Future<void> _resetWorkSessionIfEmpty() async {
     try {
+      if (UserData.workStart != null && UserData.workEnd == null) {
+        _emptyWeekSeenOnce = false;
+        return;
+      }
+
       final stats = await ApiService.fetchWeeklyWorkStats();
 
       final now = DateTime.now();
@@ -260,16 +325,33 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       });
 
       if (!hasWorkThisWeek) {
-        if (!mounted) return;
-        setState(() {
-          UserData.workStart = null;
-          UserData.workEnd = null;
-          _todayWorkMinutesFromApi = 0;
-        });
-        _stopWorkTicker();
-        debugPrint('[Work] 이번 주 근무 0분 → 로컬 근무 세션 초기화');
+        if (!_emptyWeekSeenOnce) {
+          _emptyWeekSeenOnce = true;
+          return;
+        }
+        final endedLongAgo =
+            (UserData.workEnd != null) &&
+            now.difference(UserData.workEnd!).inHours > 24;
+
+        if (endedLongAgo || UserData.workStart == null) {
+          if (!mounted) return;
+          setState(() {
+            UserData.workStart = null;
+            UserData.workEnd = null;
+            _todayWorkMinutesFromApi = 0;
+          });
+          _stopWorkTicker();
+
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove('work_start_iso');
+            await prefs.remove('work_end_iso');
+          } catch (_) {}
+        } else {
+          // 최근에 끝난 세션은 유지
+        }
       } else {
-        debugPrint('[Work] 이번 주에 근무 데이터 있음 → 초기화 스킵');
+        _emptyWeekSeenOnce = false;
       }
     } catch (e) {
       debugPrint('[Work] 초기화 확인 실패: $e');
@@ -279,6 +361,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   Future<void> _refreshAllAndSendOnce() async {
     await _fetchStepCount();
     await _fetchHeartRate();
+    await _computeAndRenderFatigue();
     await _sendHealthToServer();
     if (LocationSocketService.instance.isConnected) {
       await LocationSocketService.instance.sendHealthNow();
@@ -294,7 +377,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         count += (area['completedCount'] ?? 0) as int;
       }
 
-      // 마이크로 바: 이번 주 월~금, 오늘 요일만 (2px + 건수), 나머지는 2px
       final List<double> bars = List<double>.filled(5, _barMinPx);
       final wd = DateTime.now().weekday; // Mon=1..Sun=7
       if (wd >= 1 && wd <= 5) {
@@ -309,7 +391,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _deliveryBarsLoaded = true;
       });
 
-      // 갱신 시 피로도 즉시 재계산
       await _computeAndRenderFatigue();
     } catch (_) {
       if (!mounted) return;
@@ -335,8 +416,8 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         now.year,
         now.month,
         now.day,
-      ).subtract(Duration(days: now.weekday - 1)); // 월
-      final weekEnd = weekStart.add(const Duration(days: 4)); // 금
+      ).subtract(Duration(days: now.weekday - 1));
+      final weekEnd = weekStart.add(const Duration(days: 4));
 
       final Map<int, int> minutesByWeekday = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
 
@@ -357,9 +438,8 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         minutesByWeekday[5]!,
       ];
 
-      // 스케일: 모두 0이면 480분(8시간)을 기준으로
       final maxM = minutesList.fold<int>(0, (m, v) => v > m ? v : m);
-      final scaleBase = (maxM > 0) ? maxM : 480;
+      final scaleBase = (maxM > 0) ? maxM : 480; // 모두 0이면 8시간 기준
 
       final bars =
           minutesList.map((m) {
@@ -368,7 +448,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
             return h.clamp(_barMinPx, _barMaxPx);
           }).toList();
 
-      // 오늘 분(서버값)
       int todayM = 0;
       final todayKey = DateTime(now.year, now.month, now.day);
       for (final d in stats.dailyStats) {
@@ -390,7 +469,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _workBarsLoaded = true;
       });
 
-      // 갱신 시 피로도 즉시 재계산
       await _computeAndRenderFatigue();
     } catch (e) {
       debugPrint('fetchWeeklyWorkStats error: $e');
@@ -501,8 +579,12 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
                     Expanded(
                       child: Text(
                         _fatigueMessageDyn,
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 15,
+                          height: 1.25,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -819,6 +901,8 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       );
       if (shouldDisconnect == true) {
         await _service.disconnect();
+        _service.stopChangePolling();
+        _healthSub?.cancel();
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('health_connected', false);
         if (!mounted) return;
@@ -859,8 +943,9 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _heartRate = '...';
       });
       await _refreshAllAndSendOnce();
-      _startHealthStreaming();
-      _startUiRefreshTicker(); // 연결 시 자동 새로고침 보장
+
+      // 이벤트 기반 갱신 시작
+      _attachHealthChangeStream();
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -870,7 +955,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     }
   }
 
-  // ── 걸음/심박 불러오기 ────────────────────────────────────────────
+  // ── 걸음/심박 불러오기 (수동 새로고침용) ────────────────────────────
   Future<void> _fetchStepCount({bool silent = false}) async {
     if (!silent) {
       setState(() {
@@ -889,8 +974,9 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         UserData.stepCount = today;
       });
 
-      // 갱신 시 피로도 즉시 재계산
-      await _computeAndRenderFatigue();
+      if (!silent) {
+        await _computeAndRenderFatigue();
+      }
 
       if (LocationSocketService.instance.isConnected) {
         await LocationSocketService.instance.sendHealthNow();
@@ -929,9 +1015,10 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         UserData.heartRate = hr;
       });
 
-      // 심박 히스토리에 누적 + 즉시 재계산
       _pushHr(hr);
-      await _computeAndRenderFatigue();
+      if (!silent) {
+        await _computeAndRenderFatigue();
+      }
 
       if (LocationSocketService.instance.isConnected) {
         await LocationSocketService.instance.sendHealthNow();
@@ -964,7 +1051,8 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
 
     if (isConnected) {
       await _refreshAllAndSendOnce();
-      _startUiRefreshTicker(); // 연결 시 자동 새로고침 보장
+      // 이벤트 기반 갱신
+      _attachHealthChangeStream();
     } else {
       setState(() {
         _stepCount = '연동 필요';
@@ -1000,8 +1088,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _heartRate = '...';
       });
       await _refreshAllAndSendOnce();
-      _startHealthStreaming();
-      _startUiRefreshTicker(); // 연결 시 자동 새로고침 보장
+      _attachHealthChangeStream();
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1014,7 +1101,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   // ── 서버로 건강 데이터 전송 ───────────────────────────────────────
   Future<void> _sendHealthToServer() async {
     if (_stepCountValue > 0 && _heartRateValue > 0) {
-      UserData.conditionStatus = '좋음';
+      UserData.conditionStatus = _fatigueLevel;
       await ApiService.sendHealthData(
         step: _stepCountValue,
         heartRate: _heartRateValue,
@@ -1026,55 +1113,43 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   // ── 피로도 계산 유틸 ─────────────────────────────────────────────
   double _clamp01(double v) => v < 0 ? 0 : (v > 1 ? 1 : v);
 
-  // 등급 → 심각도(숫자) 매핑
   int _levelToSeverity(String level) {
     switch (level) {
       case '좋음':
         return 0;
-      case '보통':
+      case '경고':
         return 1;
-      case '주의':
-        return 2;
       case '위험':
-        return 3;
+        return 2;
       default:
         return 1;
     }
   }
 
-  // 알림 텍스트 템플릿
   Map<String, String> _alarmTextForLevel(String level, double score) {
     switch (level) {
-      case '주의':
-        return {'title': '피로도 주의 상태입니다.', 'subtitle': '잠깐 스트레칭/수분 섭취 권장'};
+      case '경고':
+        return {'title': '피로도 경고 상태입니다.', 'subtitle': '잠깐 스트레칭과 수분 섭취를 권장합니다.'};
       case '위험':
         return {
           'title': '피로도 위험 상태! 휴식이 필요합니다.',
-          'subtitle': '무리 금지, 즉시 휴식 권장',
+          'subtitle': '무리 금지, 즉시 휴식을 취하세요.',
         };
       default:
         return {'title': '', 'subtitle': ''};
     }
   }
 
-  // 알림 추가 헬퍼(AlarmController 통해 리스트에 누적)
   void _pushAlarmItem(String title, String subtitle) {
     try {
-      if (!Get.isRegistered<AlarmController>()) {
-        debugPrint('[Alarm] AlarmController not registered.');
-        return;
-      }
+      if (!Get.isRegistered<AlarmController>()) return;
       final ctrl = Get.find<AlarmController>();
       ctrl.addAlarm(AlarmItem(title: title, subtitle: subtitle));
-      debugPrint('[Alarm] Added: $title | $subtitle');
-    } catch (e) {
-      debugPrint('[Alarm] Failed to add: $e');
-    }
+    } catch (_) {}
   }
 
-  // 팝업 띄우기: 상향 시, 포그라운드 & 현재화면 & 디바운스
   Future<void> _maybeShowFatiguePopup(String level, double score) async {
-    if (!(level == '주의' || level == '위험')) return;
+    if (!(level == '경고' || level == '위험')) return;
 
     final now = DateTime.now();
     final canPopup =
@@ -1099,61 +1174,76 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     );
   }
 
+  // ★ 3단계 + 2줄 메시지 + 위험 5분 잠금(유지)
   void _applyFatigueView(double s) {
-    String lvl;
-    Color col;
-    String msg;
-    if (s < 0.25) {
-      lvl = '좋음';
-      col = const Color(0xFF61D5AB);
-      msg = '컨디션이 좋아요.';
-    } else if (s < 0.50) {
-      lvl = '보통';
-      col = const Color(0xFF8EC5A8);
-      msg = '무리 없이 진행 중.';
-    } else if (s < 0.75) {
-      lvl = '주의';
-      col = const Color(0xFFFFC069);
-      msg = '잠깐 스트레칭/물 섭취 권장.';
-    } else {
-      lvl = '위험';
-      col = const Color(0xFFFF8A8A);
-      msg = '휴식 필요! 무리 금지.';
-    }
+    String newLvl;
+    Color newCol;
+    String newMsg;
+    double newScore = s;
 
-    debugPrint('[Fatigue] score=${s.toStringAsFixed(3)}, level=$lvl');
+    if (_dangerLockedUntil != null &&
+        DateTime.now().isBefore(_dangerLockedUntil!)) {
+      newLvl = '위험';
+      newCol = const Color(0xFFEE404C);
+      newMsg = '위험! 즉시 휴식이 필요합니다.\n안전한 곳에서 안정을 취하세요. (상태 유지 중)';
+      newScore = 0.9;
+    } else {
+      _dangerLockedUntil = null;
+
+      if (s < 0.50) {
+        newLvl = '좋음';
+        newCol = const Color(0xFF61D5AB);
+        newMsg = '컨디션이 좋아요.\n평소 페이스로 진행하세요.';
+      } else if (s < 0.80) {
+        newLvl = '경고';
+        newCol = const Color(0xFFFFC069);
+        newMsg = '주의! 스트레칭과 물 섭취가 필요해요.';
+      } else {
+        newLvl = '위험';
+        newCol = const Color(0xFFEE404C);
+        newMsg = '위험! 즉시 휴식이 필요합니다.';
+      }
+    }
 
     if (!mounted) return;
     setState(() {
-      _fatigue = s;
-      _fatigueLevel = lvl;
-      _fatigueColorDyn = col;
-      _fatigueMessageDyn = msg;
+      _fatigue = newScore;
+      _fatigueLevel = newLvl;
+      _fatigueColorDyn = newCol;
+      _fatigueMessageDyn = newMsg;
     });
 
-    // ★ 등급 상향 감지 → 알림 추가(디바운스, 단 "위험"은 즉시 허용) + 팝업
-    final newLevel = lvl;
-    final prev = _prevFatigueLevel;
-    final newSev = _levelToSeverity(newLevel);
-    final prevSev = prev == null ? -1 : _levelToSeverity(prev);
-    final isEscalation = newSev > prevSev;
+    LocationSocketService.instance.updateFatigue(
+      score: newScore,
+      level: newLvl,
+    );
+
+    final String prevLvl = _prevFatigueLevel ?? '좋음';
+    final int newSev = _levelToSeverity(newLvl);
+    final int prevSev = _levelToSeverity(prevLvl);
+    final bool isEscalation = newSev > prevSev;
 
     final now = DateTime.now();
-    final canInsert =
+    final canInsertAlarm =
         _lastAlarmInsertedAt == null ||
         now.difference(_lastAlarmInsertedAt!) >= _alarmDebounce;
 
-    if (isEscalation && (canInsert || newLevel == '위험')) {
-      final t = _alarmTextForLevel(newLevel, s);
-      if (t['title']!.isNotEmpty) {
+    if (isEscalation) {
+      final t = _alarmTextForLevel(newLvl, newScore);
+
+      if (newLvl == '위험') {
+        _dangerLockedUntil = DateTime.now().add(const Duration(minutes: 5));
         _pushAlarmItem(t['title']!, t['subtitle']!);
         _lastAlarmInsertedAt = now;
-
-        // 팝업도 함께
-        _maybeShowFatiguePopup(newLevel, s);
+        _maybeShowFatiguePopup(newLvl, newScore);
+      } else if (newLvl == '경고' && canInsertAlarm) {
+        _pushAlarmItem(t['title']!, t['subtitle']!);
+        _lastAlarmInsertedAt = now;
+        _maybeShowFatiguePopup(newLvl, newScore);
       }
     }
-    _prevFatigueLevel = newLevel;
+
+    _prevFatigueLevel = newLvl;
   }
 
   void _pushHr(int hr) {
@@ -1168,7 +1258,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     final vals = _hrHistory.where((e) => e > 0).toList()..sort();
     if (vals.isNotEmpty) {
       final med = vals[vals.length ~/ 2];
-      return math.max(60, med); // 과도 저심박 방지
+      return math.max(60, med);
     }
     if (_heartRateValue > 0) {
       return math.max(60, (_heartRateValue * 0.85).round());
@@ -1192,19 +1282,15 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
                   (baseline <= 0 ? 1.0 : baseline.toDouble())
               : 0.0;
 
-      // ── HR 컴포넌트 (매우 민감하게 조정) ───────────────────────────
-      // 2%↑부터 가점, 12%↑면 만점 수준
       double hrSlope = _clamp01((inc - 0.02) / 0.10);
 
-      // 새 임계치 부스트: 기준선 대비 +10bpm 이상이면 사실상 '위험'
-      // +20bpm 이상 또는 HR≥110은 즉시 최댓값
       double hrBoost = 0.0;
       final bool severeDelta = delta >= 20 || currentHR >= 110;
-      final bool acuteDelta = delta >= 10; // ← 요청: +10~20만 상승해도 위험
+      final bool acuteDelta = delta >= 10;
       if (severeDelta) {
-        hrBoost = 1.0; // 강한 위험
+        hrBoost = 1.0;
       } else if (acuteDelta) {
-        hrBoost = 0.90; // 위험 경계 넘도록 강한 부스트
+        hrBoost = 0.90;
       }
       final hrComp = math.max(hrSlope, hrBoost);
 
@@ -1212,9 +1298,16 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       final delivComp = _clamp01(deliveries / 120.0); // 0~120건
       final stepsComp = _clamp01((steps - 3000) / (15000 - 3000)); // 3k~15k
 
-      // 더미 BMI (180/80)
-      final bmi = _dummyWeightKg / math.pow(_dummyHeightCm / 100.0, 2);
-      final bmiPenalty = _clamp01((bmi - 25.0) / (27.0 - 25.0)); // 25~27 → 0~1
+      double bmiPenalty = 0.0;
+      if (_heightCm != null &&
+          _heightCm! > 0 &&
+          _weightKg != null &&
+          _weightKg! > 0) {
+        final bmi = _weightKg! / math.pow(_heightCm! / 100.0, 2);
+        bmiPenalty = _clamp01((bmi - 25.0) / (27.0 - 25.0)); // 25~27 → 0~1
+      } else {
+        bmiPenalty = 0.0;
+      }
 
       double score =
           0.55 * hrComp +
@@ -1223,7 +1316,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
           0.10 * stepsComp +
           0.05 * bmiPenalty;
 
-      // 급격한 심박 상승(+10bpm↑)은 무조건 '위험' 임계(0.75)를 넘기도록 보정
       if (acuteDelta) {
         score = math.max(score, 0.80);
       } else if (severeDelta) {
@@ -1233,7 +1325,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       _applyFatigueView(_clamp01(score));
     } catch (e) {
       debugPrint('[Fatigue] compute failed: $e');
-      _applyFatigueView(0.4); // 안전 기본값
+      _applyFatigueView(0.4);
     }
   }
 }
