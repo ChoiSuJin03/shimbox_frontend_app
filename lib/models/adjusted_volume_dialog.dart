@@ -1,3 +1,4 @@
+// lib/models/adjusted_volume_dialog.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -15,7 +16,7 @@ class AdjustedVolumeDialog extends StatelessWidget {
 
   /// 좌측 아이콘 (SVG, currentColor 사용)
   final String iconAsset;
-  final Color iconColor;
+  final Color iconColor; // 브랜드 포인트 컬러 (아이콘에만 적용)
 
   /// 팝업 크기
   final double width;
@@ -186,6 +187,7 @@ class AdjustedVolumeDialog extends StatelessWidget {
     return _titleText(title);
   }
 
+  /// 증가/감소/동일 UI를 자동 구성
   Widget _buildDescription() {
     final baseStyle = const TextStyle(
       fontSize: 13.5,
@@ -194,9 +196,29 @@ class AdjustedVolumeDialog extends StatelessWidget {
       color: Color(0xFF8F8F8F), // 기본 회색
     );
 
-    List<Widget> children = [Text(description, style: baseStyle)];
+    final List<Widget> children = [Text(description, style: baseStyle)];
 
     if (before != null && after != null) {
+      final int b = before!;
+      final int a = after!;
+      final int delta = a - b;
+
+      // 상태별 표현
+      final bool increased = delta > 0;
+      final bool decreased = delta < 0;
+      final String verb = increased ? '증가' : (decreased ? '감소' : '동일');
+      final Color changeColor =
+          increased
+              ? const Color(0xFFEE404C) // 빨강: 증가(부하 증가)
+              : (decreased
+                  ? const Color(0xFF61D5AB) // 그린: 감소(완화)
+                  : Colors.black);
+
+      final IconData arrowIcon =
+          increased
+              ? Icons.arrow_upward
+              : (decreased ? Icons.arrow_downward : Icons.remove);
+
       children.add(const SizedBox(height: 6));
       children.add(
         RichText(
@@ -204,33 +226,34 @@ class AdjustedVolumeDialog extends StatelessWidget {
             style: baseStyle,
             children: [
               const TextSpan(text: '배정건수가 '),
+              // BEFORE 숫자
               WidgetSpan(
                 alignment: PlaceholderAlignment.middle,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      '$before',
-                      style: baseStyle.copyWith(color: Colors.black),
-                    ),
-                    const SizedBox(width: 4),
-                    const Icon(
-                      Icons.arrow_forward,
-                      size: 14,
-                      color: Colors.black,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$after건',
-                      style: baseStyle.copyWith(color: Colors.black),
-                    ),
-                  ],
+                child: Text(
+                  '$b',
+                  style: baseStyle.copyWith(color: Colors.black),
+                ),
+              ),
+              const TextSpan(text: ' '),
+              // 화살표
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Icon(arrowIcon, size: 14, color: changeColor),
+              ),
+              const TextSpan(text: ' '),
+              // AFTER 숫자(+건)
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Text(
+                  '$a건',
+                  style: baseStyle.copyWith(color: Colors.black),
                 ),
               ),
               const TextSpan(text: '으로 '),
+              // 증가/감소/동일 강조
               TextSpan(
-                text: '감소',
-                style: baseStyle.copyWith(color: Colors.black),
+                text: verb,
+                style: baseStyle.copyWith(color: changeColor),
               ),
               const TextSpan(text: '되었습니다.'),
             ],

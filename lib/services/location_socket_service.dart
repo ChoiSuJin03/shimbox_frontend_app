@@ -41,10 +41,27 @@ class LocationSocketService {
   String? _token;
   Uri? _wsUri;
 
-  bool get isConnected => _ch != null;
+  // 연결 상태 플래그(채널 객체만으로는 부족)
+  bool _opened = false;
+  bool get isConnected => _opened && _ch != null;
+
+  // 재연결 지수 백오프 (1s ~ 30s)
+  int _retryMs = 1000;
 
   // ✅ 건강 데이터 소스
   final HealthService _health = HealthService();
+
+  // ✅ 최신 피로도 캐시 (HealthPage에서 업데이트)
+  double? _latestFatigueScore; // 0.0~1.0
+  String? _latestFatigueLevel; // 좋음/보통/주의/위험 (서버표준은 "좋음/경고/위험" 사용)
+
+  // ───────────────────────────────────────────
+  // 외부에서 최신 피로도 값을 반영
+  // ───────────────────────────────────────────
+  void updateFatigue({required double score, required String level}) {
+    _latestFatigueScore = score;
+    _latestFatigueLevel = level;
+  }
 
   // ───────────────────────────────────────────
   // 홈/메인에서 호출: "즉시 1회" 전송 예약 (위치)
@@ -82,11 +99,7 @@ class LocationSocketService {
 
   // 예약된 "홈 진입 1회" 전송을 조건 만족 시 실행
   void _trySendEnterNow() {
-    if (!_pendingEnterSend) {
-      // ignore
-      // print('[WS][LOC] _trySendEnterNow: no pending');
-      return;
-    }
+    if (!_pendingEnterSend) return;
     if (!isConnected) {
       print('[WS][LOC] _trySendEnterNow: not connected yet');
       return;
@@ -141,9 +154,13 @@ class LocationSocketService {
       _ch = WebSocketChannel.connect(_wsUri!);
       print('[WS] connected (channel created)');
 
+      // 채널 생성 성공 → 일단 열린 상태로 간주, 백오프 리셋
+      _opened = true;
+      _retryMs = 1000;
+
       _sub = _ch!.stream.listen(
         (event) {
-          // 서버로부터의 수신이 필요하면 여기서 처리
+          // 서버 수신 처리 필요 시 사용
           // print('[WS] <= $event');
         },
         onDone: _scheduleReconnect,
@@ -171,8 +188,7 @@ class LocationSocketService {
         sendLatestNow();
       });
 
-      // ✅ 건강: 자동 주기 전송은 기본 OFF.
-      // 필요하면 HealthPage에서 startHealthPeriodic() 호출해서 켜세요.
+      // 건강 자동 전송은 HealthPage에서 on/off
     } catch (e) {
       print('[WS] connect failed: $e');
       _scheduleReconnect();
@@ -205,14 +221,19 @@ class LocationSocketService {
       print('[WS] sink closed (normalClosure)');
     } catch (_) {}
     _ch = null;
+    _opened = false;
   }
 
   void _scheduleReconnect() {
     if (_region == null) return;
+    _opened = false;
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 3), () {
-      connect(region: _region!);
+    final delay = Duration(milliseconds: _retryMs);
+    print('[WS] reconnect in ${delay.inMilliseconds}ms');
+    _reconnectTimer = Timer(delay, () async {
+      await connect(region: _region!);
     });
+    _retryMs = (_retryMs * 2).clamp(1000, 30000);
   }
 
   // ───────────────────────────────────────────
@@ -234,9 +255,10 @@ class LocationSocketService {
       'payload': {
         'lat': lat,
         'lng': lng,
-        'captured_at': capturedAtUtc.toIso8601String(),
+        // ✅ 키 통일 (camelCase)
+        'capturedAt': capturedAtUtc.toIso8601String(),
         if (addressShort != null && addressShort.isNotEmpty)
-          'address_short': addressShort,
+          'addressShort': addressShort,
       },
     };
 
@@ -249,14 +271,14 @@ class LocationSocketService {
   }
 
   // ───────────────────────────────────────────
-  // ✅ 건강 전송 (스로틀 포함)
+  // ✅ 건강 전송 (스로틀 포함) — score/level/capturedAt로 통일
   // ───────────────────────────────────────────
 
   DateTime? _lastHealthSentAt;
   bool _healthInFlight = false;
   Duration _healthMinGap = const Duration(seconds: 3); // 최소 간격
 
-  /// 건강 데이터 즉시 1회 전송 (심박/걸음수)
+  /// 건강 데이터 즉시 1회 전송 (심박/걸음수/피로도)
   Future<void> sendHealthNow() async {
     final ch = _ch;
     if (ch == null) return;
@@ -269,7 +291,7 @@ class LocationSocketService {
       return;
     }
 
-    // 중복 실행 방지 (겹쳐 호출될 때)
+    // 중복 실행 방지
     if (_healthInFlight) {
       print('[HEALTH-WS] skip (in-flight)');
       return;
@@ -282,18 +304,26 @@ class LocationSocketService {
       final steps = await _health.getTodaySteps();
       final hr = await _health.getCurrentHeartRate();
 
+      // ✅ 웹/서버 스키마와 키 통일 (camelCase)
       final msg = {
         'type': 'health',
         'payload': {
           'heartRate': hr,
           'step': steps,
-          // 기사 -> 서버 형식은 snake_case
-          'recorded_at': DateTime.now().toUtc().toIso8601String(),
+          if (_latestFatigueScore != null) 'score': _latestFatigueScore,
+          if (_latestFatigueLevel != null) 'level': _latestFatigueLevel,
+          'capturedAt': DateTime.now().toUtc().toIso8601String(),
         },
       };
 
       ch.sink.add(jsonEncode(msg));
-      print('[HEALTH-WS] => $msg');
+      // ▼ 성공 로그: 전체 JSON + 별도 fatigue 로그
+      print('[HEALTH-WS] => ${jsonEncode(msg)}');
+      if (_latestFatigueScore != null && _latestFatigueLevel != null) {
+        print(
+          '[HEALTH-WS] fatigue score: ${_latestFatigueScore!.toStringAsFixed(3)}, fatigue level: $_latestFatigueLevel',
+        );
+      }
 
       _lastHealthSentAt = DateTime.now();
     } catch (e) {

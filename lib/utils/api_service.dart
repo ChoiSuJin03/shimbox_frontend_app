@@ -1,4 +1,3 @@
-// lib/utils/api_service.dart
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -28,6 +27,7 @@ class ApiService {
     'COMPLETED': '배송완료',
     'completed': '배송완료',
   };
+
   static String _normalizeStatus(String status) {
     final s = status.trim();
     return _STATUS_TO_KOR[s] ?? s;
@@ -105,8 +105,7 @@ class ApiService {
     }
   }
 
-  // -------------------- 배송 이미지 업로드 --------------------
-  // ✅ 요구사항: 서버로 이미지 URL을 보내지 않음. 이 메서드는 no-op으로 성공 처리.
+  // -------------------- 배송 이미지 업로드 (no-op) --------------------
   static Future<bool> sendDeliveryImage({
     required int productId,
     required String imageUrl,
@@ -117,8 +116,7 @@ class ApiService {
     return true;
   }
 
-  // lib/utils/api_service.dart (발췌)
-  // PATCH /api/v1/driver/product/status
+  // -------------------- 배송 상태 업데이트 --------------------
   static Future<bool> updateProductStatus(
     int productId,
     String status, {
@@ -130,10 +128,7 @@ class ApiService {
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/product/status');
     try {
-      // 스웨거 예시가 한글 상태이므로 한글로 정규화
       final normalized = _normalizeStatus(status);
-
-      // ✅ 스웨거 스펙 그대로: imageUrl 없음, camelCase 사용
       final body = <String, dynamic>{
         'productId': productId,
         'status': normalized,
@@ -158,11 +153,8 @@ class ApiService {
       try {
         decoded =
             jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
-      } catch (_) {
-        // 응답이 비JSON이어도 HTTP 2xx면 성공 처리
-      }
+      } catch (_) {}
 
-      // 스웨거: statusCode==0 이면 OK. (백엔드가 200만 주는 경우도 고려)
       final statusCodeField = decoded?['statusCode'];
       final int? sc =
           (statusCodeField is num)
@@ -191,7 +183,6 @@ class ApiService {
   }
 
   // -------------------- 공통 GET/PATCH --------------------
-  // ✅ 교체: ApiService.get()
   static Future<Map<String, dynamic>> get(String endpoint) async {
     final sep = endpoint.contains('?') ? '&' : '?';
     final url = Uri.parse(
@@ -203,7 +194,7 @@ class ApiService {
             url,
             headers: {
               'Content-Type': 'application/json',
-              'Accept': '*/*', // 🔧 swagger 표기 맞춤
+              'Accept': '*/*',
               'Authorization': 'Bearer ${localUser.UserData.token}',
               'Cache-Control': 'no-cache, no-store, must-revalidate',
               'Pragma': 'no-cache',
@@ -215,7 +206,6 @@ class ApiService {
       final raw = utf8.decode(res.bodyBytes);
       final body = raw.trim();
 
-      // ✅ 절대로 throw 하지 말고 상태/메시지와 함께 반환
       if (res.statusCode < 200 || res.statusCode >= 300) {
         Map<String, dynamic>? decoded;
         try {
@@ -247,7 +237,6 @@ class ApiService {
       return {'statusCode': 200, 'raw': decoded};
     } catch (e) {
       debugPrint('🔥 GET 예외 [$endpoint]: $e');
-      // ✅ 네트워크 에러도 throw 대신 구조화
       return {'statusCode': 599, 'message': e.toString(), 'data': null};
     }
   }
@@ -279,14 +268,12 @@ class ApiService {
 
     final sc = response['statusCode'] ?? response['status'] ?? 500;
 
-    // 🔐 인증/권한 문제면 UI가 안내 문구를 띄울 수 있게 빈 리스트로 넘기고 로그만 남김
     if (sc == 401 || sc == 403) {
       debugPrint('🔐 summary 인증/권한 실패(status=$sc): ${response['message']}');
       return const [];
     }
 
     if (sc != 200) {
-      // 그 외 서버 오류 등도 UI 죽이지 말고 빈 리스트
       debugPrint('❌ summary 오류(status=$sc): ${response['message']}');
       return const [];
     }
@@ -366,7 +353,7 @@ class ApiService {
     return normalized;
   }
 
-  // -------------------- 건강 데이터 --------------------
+  // -------------------- 건강 데이터 (실시간) --------------------
   static Future<bool> createDummyHealthRecord() async {
     try {
       final step = localUser.UserData.stepCount ?? 0;
@@ -451,11 +438,16 @@ class ApiService {
     }
   }
 
-  // -------------------- 건강 설문 --------------------
+  // -------------------- 건강 설문 (시그니처 변경) --------------------
+  /// POST /api/v1/driver/health/survey
+  /// finish1/2/3 + step(총 걸음수) + heartRate(오늘 평균 심박수) + conditionStatus
   static Future<bool> submitHealthSurvey({
     required String finish1,
     required String finish2,
     required String finish3,
+    required int step,
+    required int heartRate,
+    required String conditionStatus,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/health/survey');
 
@@ -463,6 +455,9 @@ class ApiService {
       'finish1': finish1.trim(),
       'finish2': finish2.trim(),
       'finish3': finish3.trim(),
+      'step': step,
+      'heartRate': heartRate,
+      'conditionStatus': conditionStatus,
     };
 
     try {
@@ -519,5 +514,210 @@ class ApiService {
       throw Exception(resp['message'] ?? '근무 통계를 불러올 수 없습니다.');
     }
     return WeeklyWorkStats.fromResponse(resp);
+  }
+
+  // ==================== ▼▼▼ 관리자/유틸 ▼▼▼ ====================
+  static Future<DriverProfileResponse> fetchDriverProfile(int driverId) async {
+    final resp = await get('/api/v1/admin/driver/$driverId/profile');
+    final sc = resp['statusCode'] ?? resp['status'] ?? 200;
+    if (!(sc == 0 || sc == 200)) {
+      throw Exception(resp['message'] ?? '기사 프로필을 불러올 수 없습니다.');
+    }
+    return DriverProfileResponse.fromJson(resp);
+  }
+
+  static Map<String, String> _authHeaders({
+    bool json = true,
+    bool acceptAny = false,
+  }) {
+    return {
+      if (json) 'Content-Type': 'application/json; charset=utf-8',
+      if (acceptAny) 'Accept': '*/*',
+      'Authorization': 'Bearer ${localUser.UserData.token}',
+    };
+  }
+
+  static Future<bool> updateDriverProfile({
+    required int driverId,
+    int? heightCm,
+    int? weightKg,
+    String? phone,
+    String? vehicleNumber,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/admin/driver/$driverId/profile');
+
+    final body = <String, dynamic>{
+      if (heightCm != null) 'heightCm': heightCm,
+      if (weightKg != null) 'weightKg': weightKg,
+      if (_fallback(phone) != null) 'phone': phone,
+      if (_fallback(vehicleNumber) != null) 'vehicleNumber': vehicleNumber,
+    };
+
+    if (body.isEmpty) {
+      debugPrint('ℹ️ updateDriverProfile: 변경할 값이 없습니다.');
+      return true;
+    }
+
+    try {
+      final res = await http.patch(
+        url,
+        headers: _authHeaders(),
+        body: jsonEncode(body),
+      );
+
+      Map<String, dynamic>? decoded;
+      try {
+        decoded =
+            jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>?;
+      } catch (_) {}
+
+      final sc = decoded?['statusCode'] ?? res.statusCode;
+      final ok =
+          sc == 0 ||
+          sc == 200 ||
+          (res.statusCode >= 200 && res.statusCode < 300);
+
+      if (!ok) {
+        debugPrint(
+          '❌ updateDriverProfile 실패: http=${res.statusCode}, api=$sc, body=${res.body} (req=$body)',
+        );
+      } else {
+        debugPrint('✅ updateDriverProfile 성공: $body');
+      }
+      return ok;
+    } catch (e) {
+      debugPrint('🔥 updateDriverProfile 예외: $e');
+      return false;
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> fetchDriverHealthHistory({
+    required int driverId,
+    DateTime? from,
+    DateTime? to,
+    int page = 0,
+    int size = 20,
+  }) async {
+    String fmt(DateTime d) => d.toIso8601String().substring(0, 10);
+
+    final params = <String, String>{
+      if (from != null) 'from': fmt(from),
+      if (to != null) 'to': fmt(to),
+      'page': '$page',
+      'size': '$size',
+    };
+
+    final query = params.entries
+        .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
+
+    final endpoint =
+        '/api/v1/admin/driver/$driverId/health/history${query.isEmpty ? '' : '?$query'}';
+
+    final resp = await get(endpoint);
+    final sc = resp['statusCode'] ?? resp['status'] ?? 500;
+
+    if (!(sc == 0 || sc == 200)) {
+      debugPrint(
+        '❌ fetchDriverHealthHistory 실패(status=$sc): ${resp['message']}',
+      );
+      return const [];
+    }
+
+    final data = resp['data'];
+    if (data is List) {
+      return data
+          .cast<Map>()
+          .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
+          .toList();
+    }
+
+    if (data is Map && data['content'] is List) {
+      final list = (data['content'] as List).cast<Map>();
+      return list
+          .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
+          .toList();
+    }
+
+    return const [];
+  }
+
+  static Future<List<Map<String, dynamic>>> fetchMyAttendanceHistory({
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    String fmt(DateTime d) => d.toIso8601String().substring(0, 10);
+
+    final endpoint =
+        '/api/v1/driver/attendance/history?from=${fmt(from)}&to=${fmt(to)}';
+
+    final resp = await get(endpoint);
+    final sc = resp['statusCode'] ?? resp['status'] ?? 500;
+
+    if (!(sc == 0 || sc == 200)) {
+      debugPrint(
+        '❌ fetchMyAttendanceHistory 실패(status=$sc): ${resp['message']}',
+      );
+      return const [];
+    }
+
+    final data = resp['data'];
+    if (data is List) {
+      return data
+          .cast<Map>()
+          .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
+          .toList();
+    }
+    return const [];
+  }
+
+  static Future<bool> logout() async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/logout');
+    try {
+      final res = await http.post(url, headers: _authHeaders());
+
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('token');
+      } catch (_) {}
+      localUser.UserData.token = null;
+
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        debugPrint('👋 로그아웃 완료(서버/로컬)');
+        return true;
+      } else {
+        debugPrint('⚠️ 서버 로그아웃 실패: ${res.statusCode} ${res.body} (로컬 토큰은 제거됨)');
+        return false;
+      }
+    } catch (e) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('token');
+      } catch (_) {}
+      localUser.UserData.token = null;
+
+      debugPrint('🔥 로그아웃 예외: $e (로컬 토큰은 제거됨)');
+      return false;
+    }
+  }
+}
+
+// ▼ 응답 모델
+class DriverProfileResponse {
+  final Map<String, dynamic> data;
+  final String? message;
+  final int? statusCode;
+
+  DriverProfileResponse({required this.data, this.message, this.statusCode});
+
+  factory DriverProfileResponse.fromJson(Map<String, dynamic> json) {
+    return DriverProfileResponse(
+      data: (json['data'] ?? {}) as Map<String, dynamic>,
+      message: json['message'] as String?,
+      statusCode:
+          (json['statusCode'] is num)
+              ? (json['statusCode'] as num).toInt()
+              : int.tryParse(json['statusCode']?.toString() ?? ''),
+    );
   }
 }

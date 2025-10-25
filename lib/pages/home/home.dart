@@ -1,7 +1,7 @@
-// lib/pages/home/home_page.dart
 import 'package:shimbox_app/pages/alarm/alarm.dart';
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'survey_module.dart';
+import 'dart:async';
 
 import 'package:shimbox_app/models/adjusted_volume_dialog.dart';
 import 'package:shimbox_app/controllers/alarm_controller.dart';
@@ -16,6 +16,9 @@ import '../delivery/delivery_detail.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
 import 'package:shimbox_app/utils/api_service.dart';
 import 'package:shimbox_app/services/location_socket_service.dart';
+
+// ✅ 평균 심박/걸음 조회를 위해 추가
+import 'package:shimbox_app/pages/health/health_service.dart';
 
 class HomePage extends StatefulWidget {
   @override
@@ -33,17 +36,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _currentPage = 0;
   bool showSurvey = false;
 
+  Timer? _homeRefreshTicker;
+  static const Duration _homeRefreshTick = Duration(seconds: 10);
+
+  int? _lastAssignedTotal;
+  static const String _prefsAssignedKey = 'assigned_total_last';
+
+  DateTime? _lastPopupAt;
+  static const Duration _popupDebounce = Duration(seconds: 30);
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    fetchDeliverySummary();
-
     bottomController = Get.find<BottomNavController>();
 
+    _restoreLastAssignedFromPrefs();
     _connectLocationWsOnce();
     LocationSocketService.instance.markHomeEntered();
+
+    fetchDeliverySummary();
+    _startHomeRefreshTicker();
   }
 
   @override
@@ -54,6 +68,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _connectLocationWsOnce();
       }
       fetchDeliverySummary();
+      _startHomeRefreshTicker();
+    } else {
+      _stopHomeRefreshTicker();
     }
   }
 
@@ -67,15 +84,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _stopHomeRefreshTicker();
     _pageController.dispose();
     super.dispose();
   }
 
+  Future<void> _restoreLastAssignedFromPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getInt(_prefsAssignedKey);
+      _lastAssignedTotal = v;
+    } catch (_) {}
+  }
+
+  void _startHomeRefreshTicker() {
+    _homeRefreshTicker ??= Timer.periodic(
+      _homeRefreshTick,
+      (_) => _autoRefreshHome(),
+    );
+  }
+
+  void _stopHomeRefreshTicker() {
+    _homeRefreshTicker?.cancel();
+    _homeRefreshTicker = null;
+  }
+
+  Future<void> _autoRefreshHome() async {
+    if (!mounted) return;
+    if (!LocationSocketService.instance.isConnected) {
+      await _connectLocationWsOnce();
+    }
+    await fetchDeliverySummary();
+  }
+
+  // ▶ 완료(배송완료) 건은 숨기고, 활성(미완료=total-completed)만 보여주는 버전
   Future<void> fetchDeliverySummary() async {
     try {
       final data = await ApiService.fetchDeliverySummary();
-      int total = 0;
-      int completed = 0;
+
+      int totalActiveAll = 0; // 전체 활성(미완료) 합계
+      final Map<String, Map<String, int>> buckets = {};
 
       String normalizeToGu(String? raw) {
         if (raw == null) return '';
@@ -83,21 +131,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return formatKoreanAddress(s);
       }
 
-      final Map<String, Map<String, int>> buckets = {};
+      // 지역별 활성(= total - completed) 집계, 활성 0이면 제외
       for (final area in data) {
         final key = normalizeToGu(area['shippingLocation']?.toString());
-        final int t = (area['totalCount'] ?? 0).toInt();
-        final int c = (area['completedCount'] ?? 0).toInt();
+        final int total = (area['totalCount'] ?? 0).toInt();
+        final int completed = (area['completedCount'] ?? 0).toInt();
+        final int active = (total - completed).clamp(0, total);
 
-        final slot = buckets.putIfAbsent(
-          key,
-          () => {'total': 0, 'completed': 0},
-        );
-        slot['total'] = (slot['total'] ?? 0) + t;
-        slot['completed'] = (slot['completed'] ?? 0) + c;
+        if (active == 0) continue; // 전부 완료인 지역은 숨김
 
-        total += t;
-        completed += c;
+        final slot = buckets.putIfAbsent(key, () => {'active': 0});
+        slot['active'] = (slot['active'] ?? 0) + active;
+        totalActiveAll += active;
       }
 
       final areas =
@@ -105,8 +150,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               .map(
                 (e) => {
                   'name': e.key,
-                  'total': e.value['total']!,
-                  'completed': e.value['completed']!,
+                  'total': e.value['active']!, // 리스트의 total을 '활성 수'로 사용
+                  'completed': 0, // 완료는 숨김
                 },
               )
               .toList()
@@ -115,14 +160,69 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             );
 
       if (!mounted) return;
+
+      _maybeShowAdjustedVolumePopup(
+        prev: _lastAssignedTotal,
+        now: totalActiveAll,
+      );
+
       setState(() {
         deliveryAreas = areas;
-        totalDeliveries = total;
-        completedDeliveries = completed;
+        totalDeliveries = totalActiveAll; // 상단 게이지 분모도 활성 합계
+        completedDeliveries = 0; // 완료는 표시하지 않음
       });
+
+      _persistAssignedTotal(totalActiveAll);
     } catch (e) {
       print('❌ 배송 요약 불러오기 실패: $e');
     }
+  }
+
+  Future<void> _maybeShowAdjustedVolumePopup({
+    int? prev,
+    required int now,
+  }) async {
+    if (showSurvey) return;
+    if (prev == null) return;
+    if (prev == now) return;
+
+    final appState = WidgetsBinding.instance.lifecycleState;
+    final inForeground = appState == AppLifecycleState.resumed;
+    final isCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    final nowTs = DateTime.now();
+    final canPopup =
+        _lastPopupAt == null ||
+        nowTs.difference(_lastPopupAt!) >= _popupDebounce;
+
+    if (!mounted || !inForeground || !isCurrent || !canPopup) return;
+
+    _lastPopupAt = nowTs;
+
+    await AdjustedVolumeDialog.show(
+      context,
+      title: '건강/상황을 반영해 오늘 배송물량이',
+      titleLine2: '조정되었습니다.',
+      description: '무리없이 일하실 수 있도록 도와드릴게요.',
+      before: prev,
+      after: now,
+      iconColor: const Color(0xFF61D5AB),
+      width: 340,
+    );
+
+    try {
+      final alarm = Get.find<AlarmController>();
+      alarm.addAlarm(
+        AlarmItem(title: '배송물량이 조정되었습니다.', subtitle: '$prev → ${now}건'),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _persistAssignedTotal(int v) async {
+    _lastAssignedTotal = v;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefsAssignedKey, v);
+    } catch (_) {}
   }
 
   String getShortName(String fullName) {
@@ -131,10 +231,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   String _areaStatusText(Map<String, dynamic> area) {
-    final int total = (area['total'] ?? 0);
-    final int done = (area['completed'] ?? 0);
+    final int total = (area['total'] ?? 0); // 여기서는 '활성 수'
+    final int done = (area['completed'] ?? 0); // 항상 0으로 처리
     if (total == 0) return '0 / 0건 미완료';
-    if (done == 0) return '0 / $total건 미완료';
+    if (done == 0) return '0 / $total건 완료';
     if (done >= total) return '$done / $total건 완료';
     return '$done / $total건 진행 중..';
   }
@@ -165,12 +265,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Color _areaStatusColor(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
-    if (total > 0 && done >= total) return const Color(0xFF61D5AB); // 완료
-    if (done == 0) return Colors.grey; // 미시작
-    return const Color(0xFF747474); // 진행중
+    if (total > 0 && done >= total) return const Color(0xFF61D5AB);
+    if (done == 0) return Colors.grey;
+    return const Color(0xFF747474);
   }
 
-  // ✅ 상태 분리: 미시작 / 진행중 / 완료
   bool _isAreaNotStarted(Map<String, dynamic> area) {
     final int total = (area['total'] ?? 0);
     final int done = (area['completed'] ?? 0);
@@ -214,38 +313,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Stack(
       children: [
         Scaffold(
-          appBar: AppBar(
-            title: const Text('물량 조정 팝업 미리보기'),
-            actions: [
-              IconButton(
-                tooltip: '팝업 띄우기(임시)',
-                icon: const Icon(Icons.notification_important_outlined),
-                onPressed: () async {
-                  const int before = 300;
-                  const int after = 230;
-
-                  await AdjustedVolumeDialog.show(
-                    context,
-                    title: '건강 상태를 고려해 오늘 배송물량이',
-                    titleLine2: '조정 되었습니다.',
-                    description: '무리 없이 일하실 수 있도록',
-                    before: before,
-                    after: after,
-                    iconColor: const Color(0xFF61D5AB),
-                    width: 340,
-                  );
-
-                  final alarm = Get.find<AlarmController>();
-                  alarm.addAlarm(
-                    AlarmItem(
-                      title: '배송물량이 조정되었습니다.',
-                      subtitle: '$before → $after건',
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
+          // ✅ 임시 AppBar 제거 (미리보기 헤더 없앰)
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 38),
@@ -388,11 +456,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             bottomController.checkInTime.value = time;
                             bottomController.isCheckedOut.value = false;
 
-                            // HealthPage fallback용 시작시각 저장
                             UserData.workStart = now;
                             UserData.workEnd = null;
 
-                            // 로컬에도 저장
                             final prefs = await SharedPreferences.getInstance();
                             await prefs.setString(
                               'work_start_iso',
@@ -400,7 +466,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             );
                             await prefs.remove('work_end_iso');
 
-                            // HealthPage가 떠 있을 때를 대비해 1회 전송
                             LocationSocketService.instance.markHomeEntered();
 
                             if (context.mounted) {
@@ -630,7 +695,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       itemBuilder: (context, index) {
                         final area = deliveryAreas[index];
 
-                        // ✅ 상태 계산
                         final bool notStarted = _isAreaNotStarted(area);
                         final bool inProgress = _isAreaInProgress(area);
                         final bool completed = _isAreaCompleted(area);
@@ -648,7 +712,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               width: 48,
                               height: 48,
                               decoration: BoxDecoration(
-                                // 진행중(배경 초록) / 그 외(F4F4F4)
                                 color:
                                     inProgress
                                         ? const Color(0xFF61D5AB)
@@ -660,7 +723,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   'assets/images/home/marker.svg',
                                   width: 24,
                                   height: 24,
-                                  // 완료: #61D5AB / 진행중: #F4F4F4 / 미시작: 검정
                                   color:
                                       completed
                                           ? const Color(0xFF61D5AB)
@@ -694,7 +756,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   await Get.find<BottomNavController>()
                                       .goToDeliveryDetail(area);
                               if (changed == true) {
-                                await fetchDeliverySummary(); // 상세 변경 반영
+                                await fetchDeliverySummary();
                               }
                             },
                           ),
@@ -707,18 +769,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         ),
-
         if (showSurvey)
           SurveyModule(
             onSubmit: (finish1, finish2, finish3) async {
               print('📤 설문 제출 시작');
 
+              // ✅ 퇴근 직전: 오늘 총 걸음수 + 오늘 평균 심박수 확보
+              final hs = HealthService();
+              final int stepsToday = await hs.getTodaySteps();
+              final int avgHrToday = await hs.getTodayAverageHeartRate();
+              final String cond = UserData.conditionStatus ?? '좋음';
+
+              // (선택) 실시간 전송 1회
+              try {
+                await ApiService.sendHealthData(
+                  step: stepsToday,
+                  heartRate: avgHrToday,
+                  conditionStatus: cond,
+                );
+                if (LocationSocketService.instance.isConnected) {
+                  await LocationSocketService.instance.sendHealthNow();
+                }
+              } catch (e) {
+                debugPrint('퇴근 직전 건강값 전송 실패: $e');
+              }
+
+              // 1) 설문 저장 (걸음/평균심박/컨디션 포함)
               final surveySuccess = await ApiService.submitHealthSurvey(
                 finish1: finish1,
                 finish2: finish2,
                 finish3: finish3,
+                step: stepsToday,
+                heartRate: avgHrToday,
+                conditionStatus: cond,
               );
-
               if (!surveySuccess) {
                 if (context.mounted) {
                   ScaffoldMessenger.of(
@@ -728,11 +812,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 return;
               }
 
+              // 2) 근태: 퇴근
               final now = DateTime.now();
               final time =
                   '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-              final offSuccess = await ApiService.updateAttendanceStatus("퇴근");
+              final pos = LocationController.to.currentLatLng.value;
+              final offSuccess = await ApiService.updateAttendanceStatus(
+                "퇴근",
+                latitude: pos?.latitude,
+                longitude: pos?.longitude,
+              );
               if (!offSuccess) {
                 if (context.mounted) {
                   ScaffoldMessenger.of(
@@ -742,7 +832,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 return;
               }
 
-              // 종료시각 로컬/메모리에 저장
+              // 3) 로컬/표시 갱신
               UserData.workEnd = now;
               final prefs = await SharedPreferences.getInstance();
               await prefs.setString('work_end_iso', now.toIso8601String());
@@ -759,6 +849,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
               bottomController.changeBottomNav(0);
               _pageController.jumpToPage(0);
+
+              // 4) 요약 재조회 → 팝업 트리거
+              await fetchDeliverySummary();
             },
             onClose: (_) => setState(() => showSurvey = false),
           ),

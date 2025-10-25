@@ -1,14 +1,37 @@
-// lib/pages/health/health_service.dart
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:health/health.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// 값이 변할 때만 내보내는 스냅샷 (이벤트 드리븐)
+class HealthSnapshot {
+  final int steps;
+  final int heartRate;
+  final DateTime capturedAt;
+
+  HealthSnapshot({
+    required this.steps,
+    required this.heartRate,
+    DateTime? capturedAt,
+  }) : capturedAt = capturedAt ?? DateTime.now();
+}
+
 class HealthService {
   final Health _health = Health();
-  static const _channel = MethodChannel('shimbox/health');
 
+  static final MethodChannel _channel = MethodChannel('shimbox/health');
+
+  // 변화 이벤트 스트림
+  final _changesCtrl = StreamController<HealthSnapshot>.broadcast();
+  Stream<HealthSnapshot> get changes => _changesCtrl.stream;
+
+  // 최근 전송값(변경 감지용)
+  int _lastSteps = -1;
+  int _lastHr = -1;
+
+  // (Observer 없을 때) 가벼운 폴링
   Timer? _poller;
+  Duration _pollInterval = const Duration(seconds: 5);
 
   Future<bool> connect() async {
     await _health.configure();
@@ -27,32 +50,22 @@ class HealthService {
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('health_connected', ok);
+
+    if (ok) {
+      final steps = await getTodaySteps();
+      final hr = await getCurrentHeartRate();
+      _emitIfChanged(steps: steps, hr: hr, force: true);
+    }
     return ok;
   }
 
   Future<void> disconnect() async {
+    stopChangePolling();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('health_connected', false);
   }
 
-  // 디버그: 오리진 목록
-  Future<void> debugOriginsOnce() async {
-    try {
-      final now = DateTime.now();
-      final start = DateTime(now.year, now.month, now.day);
-      final json = await _channel.invokeMethod<String>('debugStepOrigins', {
-        'start': start.millisecondsSinceEpoch,
-        'end': now.millisecondsSinceEpoch,
-      });
-      // ignore: avoid_print
-      print('[HealthService] origins=$json');
-    } catch (e) {
-      // ignore: avoid_print
-      print('[HealthService] debugOrigins error: $e');
-    }
-  }
-
-  // 걸음수 (삼성 오리진 우선, 없으면 전체 합산) — "하루 전체" 유지
+  // ── 데이터 조회 ───────────────────────────────────────────────────
   Future<int> getTodaySteps() async {
     final now = DateTime.now();
     final start = DateTime(now.year, now.month, now.day);
@@ -62,42 +75,45 @@ class HealthService {
         'end': now.millisecondsSinceEpoch,
       });
       return steps ?? 0;
-    } on PlatformException catch (e) {
-      // ignore: avoid_print
-      print('[HealthService] platform error getTodaySteps: $e');
+    } on PlatformException catch (_) {
       return 0;
-    } catch (e) {
-      // ignore: avoid_print
-      print('[HealthService] getTodaySteps error: $e');
+    } catch (_) {
       return 0;
     }
   }
 
-  Future<List<int>> getPast7DaysSteps() async {
+  /// ✅ 오늘(자정~현재) 구간의 평균 심박수(bpm)
+  Future<int> getTodayAverageHeartRate() async {
     final now = DateTime.now();
-    final List<int> out = [];
-    for (int i = 6; i >= 0; i--) {
-      final d = now.subtract(Duration(days: i));
-      final s = DateTime(d.year, d.month, d.day);
-      final e = (i == 0) ? now : s.add(const Duration(days: 1));
-      try {
-        final steps = await _channel.invokeMethod<int>('getSamsungStepsTotal', {
-          'start': s.millisecondsSinceEpoch,
-          'end': e.millisecondsSinceEpoch,
-        });
-        out.add(steps ?? 0);
-      } catch (_) {
-        out.add(0);
+    final start = DateTime(now.year, now.month, now.day);
+    try {
+      var data = await _health.getHealthDataFromTypes(
+        types: const [HealthDataType.HEART_RATE],
+        startTime: start,
+        endTime: now,
+      );
+      data = _health.removeDuplicates(data);
+
+      double sum = 0;
+      int n = 0;
+      for (final d in data) {
+        final v = _asNum(d.value);
+        if (v == null) continue;
+        final bpm = v.toDouble();
+        if (bpm < 30 || bpm > 220) continue; // 간단 잡음 필터
+        sum += bpm;
+        n += 1;
       }
+      if (n == 0) return 0;
+      return (sum / n).round();
+    } catch (_) {
+      return 0;
     }
-    return out;
   }
 
-  // 심박수: 최근 5분만 조회해서 가장 최근 1개 값 반환 (플러그인 최신 API 없이도 동작)
   Future<int> getCurrentHeartRate() async {
     final now = DateTime.now();
-    final start = now.subtract(const Duration(minutes: 5));
-
+    final start = now.subtract(const Duration(minutes: 20));
     var data = await _health.getHealthDataFromTypes(
       types: const [HealthDataType.HEART_RATE],
       startTime: start,
@@ -125,5 +141,42 @@ class HealthService {
     if (v is num) return v;
     if (v is bool) return v ? 1 : 0;
     return null;
+  }
+
+  // ── 이벤트 발행/폴링 ─────────────────────────────────────────────
+  void _emitIfChanged({
+    required int steps,
+    required int hr,
+    bool force = false,
+  }) {
+    final changed = force || steps != _lastSteps || hr != _lastHr;
+    if (!changed) return;
+    _lastSteps = steps;
+    _lastHr = hr;
+    _changesCtrl.add(
+      HealthSnapshot(steps: steps, heartRate: hr, capturedAt: DateTime.now()),
+    );
+  }
+
+  void startChangePolling({Duration interval = const Duration(seconds: 5)}) {
+    _pollInterval = interval;
+    _poller?.cancel();
+    _poller = Timer.periodic(_pollInterval, (_) async {
+      try {
+        final steps = await getTodaySteps();
+        final hr = await getCurrentHeartRate();
+        _emitIfChanged(steps: steps, hr: hr);
+      } catch (_) {}
+    });
+  }
+
+  void stopChangePolling() {
+    _poller?.cancel();
+    _poller = null;
+  }
+
+  void dispose() {
+    stopChangePolling();
+    _changesCtrl.close();
   }
 }
