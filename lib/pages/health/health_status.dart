@@ -1,6 +1,9 @@
+// (생략 없이 원문 전체 붙임, 변경 라인에만 주석 표시)
 import 'dart:async';
+import 'dart:convert'; // ★ 낙상 JSON 파싱
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // ★ EventChannel 사용
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,8 +20,11 @@ import 'package:get/get.dart';
 import 'package:shimbox_app/controllers/alarm_controller.dart';
 import 'package:shimbox_app/models/alarm/alarm_item.dart';
 
-// ★ 팝업 다이얼로그
+// ★ 피로도 경고 팝업(기존)
 import 'package:shimbox_app/pages/health/health_alert_dialog.dart';
+
+// ★ 낙상 감지 전용 커스텀 다이얼로그 (X 버튼 + 빨간 타이틀 + ‘위험’ 배지)
+import 'package:shimbox_app/pages/health/fall_detected_dialog.dart';
 
 class HealthPage extends StatefulWidget {
   const HealthPage({super.key});
@@ -82,9 +88,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   Timer? _workTicker;
   static const _workTick = Duration(seconds: 10);
 
-  // ❌ 기존: 자동 UI 새로고침 10초 타이머 → 제거 (이벤트 기반으로 전환)
-  // Timer? _uiRefreshTicker;
-
   // 피로도 10분 주기 재계산 타이머 (폴백/보강용)
   Timer? _fatigueTicker;
   static const _fatigueTick = Duration(minutes: 10);
@@ -101,11 +104,24 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   // ★ (수정) 위험 상태 잠금
   DateTime? _dangerLockedUntil;
 
+  // ✅ 추가: 잠금 해제 타이머와 잠금 지속 시간
+  Timer? _dangerUnlockTimer;
+  static const Duration _dangerLockDuration = Duration(minutes: 5);
+
   // ── “이번 주 0분이면 초기화” 안전가드용 플래그 ─────────────────────
   bool _emptyWeekSeenOnce = false;
 
-  // ★ 이벤트 구독
+  // ★ 이벤트 구독(건강)
   StreamSubscription<HealthSnapshot>? _healthSub;
+
+  // ★★★ Wear 낙상 이벤트(EventChannel) ─────────────────────────────
+  static const EventChannel _fallChannel = EventChannel('shimbox/fall_events');
+  StreamSubscription<dynamic>? _fallSub;
+  DateTime? _lastFallPopupAt;
+  static const Duration _fallPopupDebounce = Duration(seconds: 30);
+
+  // ✅ 추가: 마지막 낙상 이벤트 시각(UTC)
+  DateTime? _lastFallEventAtUtc;
 
   @override
   void initState() {
@@ -119,6 +135,9 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
 
     // 폴백: 피로도는 10분마다 한 번 재평가 (서버/그래프 값 변화 대비)
     _startFatigueTicker();
+
+    // ★ 낙상 이벤트 스트림 구독 시작
+    _attachFallStream();
   }
 
   @override
@@ -127,13 +146,15 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       _startHealthStreaming();
       _startWorkTickerIfNeeded();
       _startFatigueTicker();
-      // 이벤트 기반이라 별도 UI 폴링은 필요 없음
       _service.startChangePolling(interval: const Duration(seconds: 5));
+      _computeAndRenderFatigue();
+      _attachFallStream();
     } else {
       _stopHealthStreaming();
       _stopWorkTicker();
       _stopFatigueTicker();
       _service.stopChangePolling();
+      _detachFallStream();
     }
   }
 
@@ -146,15 +167,20 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     _stopHealthStreaming();
     _stopWorkTicker();
     _stopFatigueTicker();
+
+    _dangerUnlockTimer?.cancel();
+    _detachFallStream();
+
     super.dispose();
   }
 
   // ── 소켓 전송 제어 ────────────────────────────────────────────────
   void _startHealthStreaming() {
-    if (!LocationSocketService.instance.isConnected) return;
-    // 피로도 최신값 포함해서 즉시 1회 송신
-    LocationSocketService.instance.sendHealthNow();
-    // 주기 전송(30초)은 유지하거나 필요시 꺼도 됨
+    if (!LocationSocketService.instance.isConnected) {
+      debugPrint('[HEALTH-WS] not connected (skip startHealthStreaming)');
+      return;
+    }
+    LocationSocketService.instance.sendHealthNow(); // 즉시 1회
     LocationSocketService.instance.startHealthPeriodic(
       interval: const Duration(seconds: 30),
     );
@@ -243,7 +269,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       _fatigueTick,
       (_) => _computeAndRenderFatigue(),
     );
-    _computeAndRenderFatigue(); // 최초 1회 즉시 계산
+    _computeAndRenderFatigue(); // 최초 즉시
   }
 
   void _stopFatigueTicker() {
@@ -258,15 +284,11 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     await _checkHealthConnection();
     await _maybeAutoPromptHealthConnect();
 
-    // 표시값 먼저 확보
     await _fetchDeliveryCount(); // 오늘 건수 + 배달 그래프
-    await _fetchWeeklyWorkStats(); // 근무시간 + 근무 그래프 (max(server, local))
+    await _fetchWeeklyWorkStats(); // 근무시간 + 근무 그래프
 
-    // 마지막에 초기화 판단 (근무 중이면 패스, 연속 empty 확인)
     await _resetWorkSessionIfEmpty();
-
-    // ✅ 이벤트 기반 구독 + (Observer 없으면) 가벼운 폴링 시작
-    _attachHealthChangeStream();
+    _attachHealthChangeStream(); // 이벤트 기반 갱신
   }
 
   void _attachHealthChangeStream() {
@@ -296,7 +318,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       }
     });
 
-    // Observer가 없으면 5초 간격 가벼운 폴링으로 변화 감지
     _service.startChangePolling(interval: const Duration(seconds: 5));
   }
 
@@ -487,7 +508,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     return m < 0 ? 0 : m;
   }
 
-  // ── 표시 유틸 ────────────────────────────────────────────────────
+  // ── 표시 유틸 ───────────────────────────────────────────────────
   String _formattedDate() {
     final now = DateTime.now();
     const weekdayKor = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'];
@@ -943,8 +964,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _heartRate = '...';
       });
       await _refreshAllAndSendOnce();
-
-      // 이벤트 기반 갱신 시작
       _attachHealthChangeStream();
     } else {
       if (mounted) {
@@ -1051,7 +1070,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
 
     if (isConnected) {
       await _refreshAllAndSendOnce();
-      // 이벤트 기반 갱신
       _attachHealthChangeStream();
     } else {
       setState(() {
@@ -1111,7 +1129,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   }
 
   // ── 피로도 계산 유틸 ─────────────────────────────────────────────
-  double _clamp01(double v) => v < 0 ? 0 : (v > 1 ? 1 : v);
+  double _clamp01(double v) => v < 0 ? 0 : (v > 1 ? 1 : 1.0 * v);
 
   int _levelToSeverity(String level) {
     switch (level) {
@@ -1213,6 +1231,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       _fatigueMessageDyn = newMsg;
     });
 
+    // ★ WS 전송 시 피로도 캐시 업데이트(낙상 패킷에도 함께 포함됨)
     LocationSocketService.instance.updateFatigue(
       score: newScore,
       level: newLvl,
@@ -1232,7 +1251,13 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       final t = _alarmTextForLevel(newLvl, newScore);
 
       if (newLvl == '위험') {
-        _dangerLockedUntil = DateTime.now().add(const Duration(minutes: 5));
+        _dangerLockedUntil = DateTime.now().add(_dangerLockDuration);
+        _dangerUnlockTimer?.cancel();
+        _dangerUnlockTimer = Timer(_dangerLockDuration, () {
+          _dangerLockedUntil = null; // 잠금 해제
+          _computeAndRenderFatigue(); // 즉시 재평가
+        });
+
         _pushAlarmItem(t['title']!, t['subtitle']!);
         _lastAlarmInsertedAt = now;
         _maybeShowFatiguePopup(newLvl, newScore);
@@ -1294,6 +1319,11 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       }
       final hrComp = math.max(hrSlope, hrBoost);
 
+      // ✅ 심박이 충분히 내려왔으면(급성/심각 아님) 잠금 조기 해제
+      if (_dangerLockedUntil != null && !severeDelta && !acuteDelta) {
+        _dangerLockedUntil = null;
+      }
+
       final workComp = _clamp01((workMin - 180) / (600 - 180)); // 3h→0, 10h→1
       final delivComp = _clamp01(deliveries / 120.0); // 0~120건
       final stepsComp = _clamp01((steps - 3000) / (15000 - 3000)); // 3k~15k
@@ -1328,4 +1358,137 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       _applyFatigueView(0.4);
     }
   }
+
+  // ────────────── ★ 낙상(EventChannel) 핸들러들 ──────────────
+  void _attachFallStream() {
+    _fallSub?.cancel();
+    _fallSub = _fallChannel.receiveBroadcastStream().listen(
+      (dynamic raw) async {
+        try {
+          // MainActivity에서 JSON 문자열 그대로 넘김
+          final String s = raw is String ? raw : (raw?.toString() ?? '{}');
+          debugPrint('[Fall] raw: $s');
+          final Map<String, dynamic> data = jsonDecode(s);
+
+          // 이벤트 시각 파싱(가능 시 사용)
+          final dynamic ts =
+              (data['capturedAt'] ?? data['ts'] ?? data['timestamp']);
+          DateTime? eventUtc;
+          if (ts is String && ts.isNotEmpty) {
+            final parsed = DateTime.tryParse(ts);
+            if (parsed != null) {
+              eventUtc = parsed.isUtc ? parsed : parsed.toUtc();
+            }
+          }
+          _lastFallEventAtUtc = eventUtc ?? DateTime.now().toUtc();
+
+          // 서버/워치 포맷에 따라 널리 대응
+          final status =
+              (data['status'] ?? data['result'] ?? '').toString().toLowerCase();
+          final type = (data['type'] ?? '').toString().toLowerCase();
+          final ok = (data['ok'] ?? data['success'] ?? false) == true;
+
+          // 조건: status == fail || (명시적 ok=false) || type == 'fall' & severity>=threshold
+          final severity =
+              (data['severity'] is num)
+                  ? (data['severity'] as num).toDouble()
+                  : null;
+
+          final isFail = status == 'fail' || (!ok && status.isEmpty);
+          final looksLikeFall = type.contains('fall') || data['fall'] == true;
+
+          final isFall =
+              isFail || looksLikeFall || (severity != null && severity >= 0.8);
+
+          debugPrint(
+            '[Fall] parsed -> status=$status type=$type ok=$ok severity=$severity isFall=$isFall',
+          );
+
+          if (isFall) {
+            // ★ 디버깅 로그: 신원 필드가 붙는지 확인 (WS 쪽에서 driverId/driverName 포함)
+            debugPrint('[Fall] sending WS with ID via sendHealthFall');
+
+            // ★ 감지 TRUE 즉시 전송 (피로도 score/level도 함께 실림)
+            await LocationSocketService.instance.sendHealthFall(
+              isDetected: true,
+              capturedAtUtc: _lastFallEventAtUtc,
+            );
+
+            // ★ 팝업 띄우기 (닫힘 처리/false 전송은 다이얼로그 콜백에서 처리)
+            await _showFallAlert(subtitle: _buildFallSubtitle(data));
+          }
+        } catch (e) {
+          debugPrint('[Fall] payload parse error: $e');
+        }
+      },
+      onError: (e) => debugPrint('[Fall] stream error: $e'),
+      cancelOnError: false,
+    );
+    debugPrint('[Fall] stream attached');
+  }
+
+  void _detachFallStream() {
+    _fallSub?.cancel();
+    _fallSub = null;
+    debugPrint('[Fall] stream detached');
+  }
+
+  String _buildFallSubtitle(Map<String, dynamic> data) {
+    final ts = (data['capturedAt'] ?? data['ts'] ?? data['timestamp']);
+    if (ts is String && ts.isNotEmpty) {
+      return '낙상 의심 신호가 감지되었습니다.\n시간: $ts';
+    }
+    return '낙상 의심 신호가 감지되었습니다.\n안전을 먼저 확인하세요.';
+  }
+
+  // ✅ 낙상 팝업: 커스텀 다이얼로그 사용
+  //   - 이제 여기서는 "false"를 직접 보내지 않고
+  //   - 다이얼로그 쪽에서 onResolve 콜백을 통해 false 전송
+  Future<void> _showFallAlert({required String subtitle}) async {
+    // 포그라운드 + 현재 화면일 때만 팝업
+    final appState = WidgetsBinding.instance.lifecycleState;
+    final inForeground = appState == AppLifecycleState.resumed;
+    final isCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (!mounted || !inForeground || !isCurrent) {
+      debugPrint(
+        '[Fall] popup skipped (foreground=$inForeground, isCurrent=$isCurrent)',
+      );
+      return;
+    }
+
+    // 30초 디바운스
+    final now = DateTime.now();
+    if (_lastFallPopupAt != null &&
+        now.difference(_lastFallPopupAt!) < _fallPopupDebounce) {
+      debugPrint('[Fall] popup debounced');
+      return;
+    }
+    _lastFallPopupAt = now;
+
+    // 🔔 여기서 커스텀 다이얼로그 호출
+    await FallDetectedDialog.show(
+      context,
+      title: '낙상이 감지되었습니다.',
+      subtitle: subtitle,
+      badgeText: '위험',
+      barrierDismissible: false, // ★ 추가: 바깥 터치로 닫히지 않게
+      onResolved: () async {
+        // ★ 추가: 유저가 직접 닫았을 때만 호출되는 콜백
+        await LocationSocketService.instance.sendHealthFall(
+          isDetected: false,
+          capturedAtUtc: DateTime.now().toUtc(),
+        );
+        _pushAlarmItem('낙상 의심 감지', '안전을 먼저 확인하세요.');
+      },
+    );
+
+    // ❌ 기존: 팝업 닫힌 직후 여기서 false 보내던 부분 제거
+    // await LocationSocketService.instance.sendHealthFall(
+    //   isDetected: false,
+    //   capturedAtUtc: DateTime.now().toUtc(),
+    // );
+    // _pushAlarmItem('낙상 의심 감지', '안전을 먼저 확인하세요.');
+  }
+
+  // ────────────────────────────────────────────────────────────────
 }

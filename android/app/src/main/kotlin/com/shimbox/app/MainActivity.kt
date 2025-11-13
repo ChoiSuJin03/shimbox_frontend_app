@@ -1,9 +1,14 @@
 package com.shimbox.app
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.lifecycle.lifecycleScope
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.EventChannel
 
 // Health Connect
 import androidx.health.connect.client.HealthConnectClient
@@ -14,8 +19,12 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 
+// ★ 워치 → 폰 메시지 브로드캐스트 액션 (FallMessageService에서 보냄)
+import com.shimbox.app.wear.FallMessageService
+
 class MainActivity : FlutterFragmentActivity() {
 
+    // ========== Health Connect (기존) ==========
     // Health Connect client (lazy) — getSdkStatus 사용, 패키지명은 literal 로
     private val healthClient: HealthConnectClient? by lazy {
         val status = HealthConnectClient.getSdkStatus(
@@ -29,9 +38,24 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    // ========== ★ Wear 낙상 이벤트용 EventChannel ==========
+    private val FALL_CHANNEL = "shimbox/fall_events"
+    private var fallSink: EventChannel.EventSink? = null
+
+    // 폰 서비스(FallMessageService)가 보낸 브로드캐스트 → Dart로 전달
+    private val fallReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == FallMessageService.ACTION_FALL_EVENT) {
+                val payload = intent.getStringExtra(FallMessageService.EXTRA_PAYLOAD) ?: "{}"
+                fallSink?.success(payload) // JSON 문자열 그대로 Flutter로 push
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        // ========== (기존) MethodChannel: "shimbox/health" ==========
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "shimbox/health")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -70,10 +94,28 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // ========== ★ 추가: EventChannel: "shimbox/fall_events" ==========
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, FALL_CHANNEL)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(args: Any?, events: EventChannel.EventSink?) {
+                    fallSink = events
+                    // 브로드캐스트 수신 시작
+                    registerReceiver(
+                        fallReceiver,
+                        IntentFilter(FallMessageService.ACTION_FALL_EVENT)
+                    )
+                }
+
+                override fun onCancel(args: Any?) {
+                    // 수신 해제
+                    unregisterReceiver(fallReceiver)
+                    fallSink = null
+                }
+            })
     }
 
-    // ===== Health Connect helpers =====
-
+    // ===== Health Connect helpers (기존) =====
     private suspend fun getStepsTotalViaHealthConnect(startMs: Long, endMs: Long): Int {
         val client = healthClient ?: return 0
         val start = Instant.ofEpochMilli(startMs)
