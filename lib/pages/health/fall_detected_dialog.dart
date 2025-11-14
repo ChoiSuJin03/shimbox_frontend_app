@@ -1,20 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
-/// 건강 경고 팝업 (낙상 감지 알럿과 동일한 UI 프레임)
-class HealthAlertDialog {
+/// 낙상 감지 알럿 (좌상단 "위험" 배지 + 레드 톤 + 닫기 버튼)
+class FallDetectedDialog {
   static Future<void> show(
     BuildContext context, {
-    String badgeText = '경고',
-    String title = '현재 심박수가 평소보다 높습니다.',
-    String subtitle = '무리하지 마시고 휴식을 권장합니다.',
-    String warningIconPath = 'assets/images/icons/warning.svg',
+    String badgeText = '위험',
+    String title = '낙상이 감지되었습니다.',
+    String? subtitle, // 추가 문구가 있으면 여기로
     double width = 340,
-    Color warningColor = const Color(0xFFEE404C), // 빨강 (등급별 조정 가능)
+    bool barrierDismissible = false, // ★ 추가: 바깥 터치로 닫을지 여부
+    Future<void> Function()? onResolved, // ★ 추가: 유저가 직접 닫았을 때 콜백
   }) async {
     return showDialog(
       context: context,
-      barrierDismissible: true,
+      barrierDismissible: barrierDismissible, // ★ 적용
       barrierColor: Colors.black.withOpacity(0.32),
       builder: (_) {
         final card = Material(
@@ -47,26 +46,32 @@ class HealthAlertDialog {
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          SvgPicture.asset(
-                            warningIconPath,
-                            width: 24,
-                            height: 24,
-                            theme: SvgTheme(currentColor: warningColor),
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            size: 22,
+                            color: Color(0xFFEE404C),
                           ),
                           const SizedBox(width: 6),
                           Expanded(
                             child: Text(
                               title,
-                              style: TextStyle(
+                              style: const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w900,
                                 height: 1.35,
-                                color: warningColor,
+                                color: Color(0xFFEE404C), // 빨간색
                               ),
                             ),
                           ),
+                          // 닫기(X) 버튼
                           GestureDetector(
-                            onTap: () => Navigator.of(context).pop(),
+                            onTap: () async {
+                              // ★ 유저가 직접 닫을 때만 onResolved 호출
+                              if (onResolved != null) {
+                                await onResolved();
+                              }
+                              Navigator.of(context).pop();
+                            },
                             child: const Icon(
                               Icons.close_rounded,
                               size: 20,
@@ -76,24 +81,33 @@ class HealthAlertDialog {
                         ],
                       ),
                       const SizedBox(height: 10),
-
-                      Text(
-                        subtitle,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          height: 1.45,
-                          color: Colors.black87,
+                      if (subtitle != null && subtitle.isNotEmpty)
+                        Text(
+                          subtitle,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            height: 1.45,
+                            color: Colors.black87,
+                          ),
+                        )
+                      else
+                        const Text(
+                          '안전을 먼저 확인하세요.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            height: 1.45,
+                            color: Colors.black87,
+                          ),
                         ),
-                      ),
                     ],
                   ),
                 ),
 
-                // 좌상단 "경고" 배지 (낙상과 동일한 위치/스타일)
+                // 좌상단 "위험" 배지
                 Positioned(
                   left: -4,
                   top: -10,
-                  child: _DangerBadge(text: badgeText, color: warningColor),
+                  child: _DangerBadge(text: badgeText),
                 ),
               ],
             ),
@@ -108,15 +122,14 @@ class HealthAlertDialog {
 
 class _DangerBadge extends StatelessWidget {
   final String text;
-  final Color color;
-  const _DangerBadge({super.key, required this.text, required this.color});
+  const _DangerBadge({super.key, required this.text});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: ShapeDecoration(
-        color: color,
+        color: const Color(0xFFEE404C),
         shape: const StadiumBorder(),
         shadows: const [
           BoxShadow(

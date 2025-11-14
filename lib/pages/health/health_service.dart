@@ -113,7 +113,7 @@ class HealthService {
 
   Future<int> getCurrentHeartRate() async {
     final now = DateTime.now();
-    final start = now.subtract(const Duration(minutes: 20));
+    final start = now.subtract(const Duration(minutes: 40));
     var data = await _health.getHealthDataFromTypes(
       types: const [HealthDataType.HEART_RATE],
       startTime: start,

@@ -201,12 +201,13 @@ class AdjustedVolumeDialog extends StatelessWidget {
     if (before != null && after != null) {
       final int b = before!;
       final int a = after!;
-      final int delta = a - b;
+      final int delta = a - b; // +면 증가, -면 감소
+      final int diff = (b - a).abs();
 
-      // 상태별 표현
       final bool increased = delta > 0;
       final bool decreased = delta < 0;
-      final String verb = increased ? '증가' : (decreased ? '감소' : '동일');
+
+      // 색/아이콘
       final Color changeColor =
           increased
               ? const Color(0xFFEE404C) // 빨강: 증가(부하 증가)
@@ -220,46 +221,106 @@ class AdjustedVolumeDialog extends StatelessWidget {
               : (decreased ? Icons.arrow_downward : Icons.remove);
 
       children.add(const SizedBox(height: 6));
-      children.add(
-        RichText(
-          text: TextSpan(
-            style: baseStyle,
-            children: [
-              const TextSpan(text: '배정건수가 '),
-              // BEFORE 숫자
-              WidgetSpan(
-                alignment: PlaceholderAlignment.middle,
-                child: Text(
-                  '$b',
-                  style: baseStyle.copyWith(color: Colors.black),
+
+      if (decreased) {
+        // 🔻 감소 케이스: "4건 ↓ 6건이 되었어요." (텍스트 '다운' 제거)
+        children.add(
+          RichText(
+            text: TextSpan(
+              style: baseStyle,
+              children: [
+                const TextSpan(text: '배정건수가 '),
+                // 변화량
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Text(
+                    '$diff건',
+                    style: baseStyle.copyWith(
+                      color: changeColor,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
                 ),
-              ),
-              const TextSpan(text: ' '),
-              // 화살표
-              WidgetSpan(
-                alignment: PlaceholderAlignment.middle,
-                child: Icon(arrowIcon, size: 14, color: changeColor),
-              ),
-              const TextSpan(text: ' '),
-              // AFTER 숫자(+건)
-              WidgetSpan(
-                alignment: PlaceholderAlignment.middle,
-                child: Text(
-                  '$a건',
-                  style: baseStyle.copyWith(color: Colors.black),
+                const TextSpan(text: ' '),
+                // 아이콘(아래 화살표)
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Icon(arrowIcon, size: 14, color: changeColor),
                 ),
-              ),
-              const TextSpan(text: '으로 '),
-              // 증가/감소/동일 강조
-              TextSpan(
-                text: verb,
-                style: baseStyle.copyWith(color: changeColor),
-              ),
-              const TextSpan(text: '되었습니다.'),
-            ],
+                const TextSpan(text: ' '),
+                // 최종 값
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Text(
+                    '$a건',
+                    style: baseStyle.copyWith(color: Colors.black),
+                  ),
+                ),
+                const TextSpan(text: '이 되었어요.'),
+              ],
+            ),
           ),
-        ),
-      );
+        );
+      } else if (increased) {
+        // 🔺 증가 케이스: "3건 ↑ 15건이 되었어요." (텍스트 '업' 제거)
+        children.add(
+          RichText(
+            text: TextSpan(
+              style: baseStyle,
+              children: [
+                const TextSpan(text: '배정건수가 '),
+                // 변화량
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Text(
+                    '$diff건',
+                    style: baseStyle.copyWith(
+                      color: changeColor,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const TextSpan(text: ' '),
+                // 아이콘(위 화살표)
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Icon(arrowIcon, size: 14, color: changeColor),
+                ),
+                const TextSpan(text: ' '),
+                // 최종 값
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Text(
+                    '$a건',
+                    style: baseStyle.copyWith(color: Colors.black),
+                  ),
+                ),
+                const TextSpan(text: '이 되었어요.'),
+              ],
+            ),
+          ),
+        );
+      } else {
+        // 변동 없음
+        children.add(
+          RichText(
+            text: TextSpan(
+              style: baseStyle,
+              children: [
+                const TextSpan(text: '배정건수가 '),
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: Text(
+                    '$a건',
+                    style: baseStyle.copyWith(color: Colors.black),
+                  ),
+                ),
+                const TextSpan(text: '으로 동일합니다.'),
+              ],
+            ),
+          ),
+        );
+      }
     }
 
     final content = Column(

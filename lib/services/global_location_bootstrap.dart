@@ -1,7 +1,9 @@
+// lib/controllers/global_location_bootstrap.dart
 import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart'; // LatLng
+import 'package:shared_preferences/shared_preferences.dart'; // ★ ADDED
 import 'package:shimbox_app/controllers/location_controller.dart';
 import 'package:shimbox_app/services/location_socket_service.dart';
 
@@ -12,27 +14,53 @@ class GlobalLocationBootstrap {
   Timer? _tick;
   bool _started = false;
 
+  static const String _regionHint = '구로구동양미래대';
+
   Future<void> start() async {
     if (_started) return;
     _started = true;
 
-    // 1) 권한 확보 + 현재 위치 1회 갱신
+    // ★ ADDED: 캐시된 좌표를 즉시 복구 → 화면/WS에 바로 사용
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final lat = prefs.getDouble('last_lat');
+      final lng = prefs.getDouble('last_lng');
+      final addr = prefs.getString('last_addr_short');
+      if (lat != null && lng != null) {
+        await LocationController.to.setLatLng(
+          LatLng(lat, lng),
+          updateAddress: false,
+        );
+        LocationSocketService.instance.updateLatestPosition(
+          lat: lat,
+          lng: lng,
+          addressShort: addr,
+        );
+        LocationSocketService.instance.sendLatestNow();
+      }
+    } catch (_) {}
+
     await _ensurePermission();
-    await _refreshOnce(); // 현재 좌표/주소 채워넣기
 
-    // ✅ 연결 직후 즉시 1회 전송 예약 (홈에 안가도 첫 위치 전송)
-    LocationSocketService.instance.markHomeEntered();
+    // 주소 포함 1회 강제 갱신
+    await _refreshOnce(updateAddress: true);
 
-    // 2) 지역으로 WS 연결 (홈에 안 가도)
+    // ★ CHANGED: 지역 미확정이어도 먼저 '전국'으로 즉시 연결 후, 확정 시 재연결
     await _connectWsByCurrentRegion();
 
-    // 3) 주기적으로 현재 위치 갱신 + 소켓으로 전송
+    // 빠른 전송 2회
+    await _sendLastKnownFast();
+    await _sendCurrentFast();
+
+    // 주기 송신
     _tick = Timer.periodic(const Duration(seconds: 20), (_) async {
-      await _refreshOnce();
+      await _sendCurrentFast(); // 즉시 송신 시도(짧은 타임리밋)
+      unawaited(_refreshOnce(updateAddress: true));
+
       if (LocationSocketService.instance.isConnected) {
         LocationSocketService.instance.sendLatestNow();
       } else {
-        await _connectWsByCurrentRegion(); // 끊겨 있으면 재연결
+        await _connectWsByCurrentRegion();
       }
     });
   }
@@ -54,18 +82,48 @@ class GlobalLocationBootstrap {
     } catch (_) {}
   }
 
-  Future<void> _refreshOnce() async {
+  Future<void> _refreshOnce({required bool updateAddress}) async {
     try {
       final enabled = await Geolocator.isLocationServiceEnabled();
       if (!enabled) return;
 
       final p = await Geolocator.getCurrentPosition();
-      // LocationController에는 updateByLatLng가 없으므로 setLatLng 사용
       await LocationController.to.setLatLng(
         LatLng(p.latitude, p.longitude),
-        updateAddress: true, // 축약/전체 주소를 컨트롤러에서 갱신
+        updateAddress: updateAddress,
       );
     } catch (_) {}
+  }
+
+  Future<void> _sendLastKnownFast() async {
+    try {
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null) {
+        await LocationController.to.setLatLng(
+          LatLng(last.latitude, last.longitude),
+          updateAddress: false,
+        );
+        LocationSocketService.instance.sendLatestNow();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _sendCurrentFast() async {
+    try {
+      final p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+        timeLimit: const Duration(milliseconds: 300), // ★ CHANGED: 300ms
+      );
+      await LocationController.to.setLatLng(
+        LatLng(p.latitude, p.longitude),
+        updateAddress: false,
+      );
+      LocationSocketService.instance.sendLatestNow();
+    } catch (_) {
+      // 실패해도 캐시/lastKnown로 이미 화면은 채워짐
+    }
   }
 
   String _extractGu(String? s) {
@@ -76,13 +134,40 @@ class GlobalLocationBootstrap {
   }
 
   Future<void> _connectWsByCurrentRegion() async {
-    // 현재 요약 주소에서 '구' 추출 → 지역 룸 접속
-    final short = LocationController.to.currentShortAddress.value;
-    var region = _extractGu(short);
-    if (region.isEmpty) {
-      // 마지막 fallback
-      region = '성북구';
+    // ★ ADDED: 일단 즉시 '전국' 룸으로 붙기(빈 화면 방지)
+    if (!LocationSocketService.instance.isConnected) {
+      await LocationSocketService.instance.connect(region: '전국');
     }
-    await LocationSocketService.instance.connect(region: region);
+
+    // 이후 짧게 기다려 구를 얻고, 확정되면 재연결
+    final region = await _resolveGuWithWait(
+      maxWait: const Duration(milliseconds: 1200),
+    );
+    String finalRegion = region ?? '';
+
+    if (finalRegion.isEmpty) {
+      final hintGu = _extractGu(_regionHint);
+      if (hintGu.isNotEmpty) finalRegion = hintGu;
+    }
+    if (finalRegion.isEmpty) {
+      finalRegion = '전국';
+    }
+
+    // 같은 region이면 서버가 무시, 다르면 재연결
+    await LocationSocketService.instance.connect(region: finalRegion);
+  }
+
+  Future<String?> _resolveGuWithWait({required Duration maxWait}) async {
+    final start = DateTime.now();
+    while (true) {
+      final short = LocationController.to.currentShortAddress.value;
+      final gu = _extractGu(short);
+      if (gu.isNotEmpty) return gu;
+
+      if (DateTime.now().difference(start) >= maxWait) {
+        return null;
+      }
+      await Future.delayed(const Duration(milliseconds: 120));
+    }
   }
 }

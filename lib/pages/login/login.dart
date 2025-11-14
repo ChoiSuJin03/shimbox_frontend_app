@@ -4,7 +4,7 @@ import 'package:shimbox_app/models/login_response.dart' as model;
 import 'package:shimbox_app/utils/api_service.dart';
 import '../root/root.dart';
 import 'package:shimbox_app/models/test_user_data.dart';
-import 'package:shimbox_app/services/global_location_bootstrap.dart'; // ✅ 추가
+import 'package:shimbox_app/services/global_location_bootstrap.dart'; // ✅ 로그인 직후 위치/WS 부트스트랩 (선택)
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -16,19 +16,36 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  bool _loading = false;
 
   Future<void> _login() async {
-    final loginData = LoginData(
-      email: _emailController.text.trim(),
-      password: _passwordController.text.trim(),
-    );
+    if (_loading) return;
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
 
-    final model.LoginResponse? result = await ApiService.loginUser(loginData);
-    print('서버 응답값: $result');
+    if (email.isEmpty || password.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('아이디와 비밀번호를 입력해 주세요.')));
+      return;
+    }
 
-    if (result != null) {
+    setState(() => _loading = true);
+    try {
+      final loginData = LoginData(email: email, password: password);
+      final model.LoginResponse? result = await ApiService.loginUser(loginData);
+      debugPrint('서버 응답값: $result');
+
+      if (result == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('❗계정이 존재하지 않거나 비밀번호가 틀렸습니다')),
+        );
+        return;
+      }
+
       final userData = result.data;
-
       if (!userData.approved) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -40,13 +57,13 @@ class _LoginPageState extends State<LoginPage> {
       // 승인된 사용자 저장
       UserData.name = userData.name;
       UserData.token = userData.accessToken;
-      UserData.email = loginData.email;
+      UserData.email = email;
       UserData.residence = userData.residence;
 
-      print('✅ 저장된 사용자 이름: ${UserData.name}');
-      print('✅ 저장된 토큰: ${UserData.token}');
+      debugPrint('✅ 저장된 사용자 이름: ${UserData.name}');
+      debugPrint('✅ 저장된 토큰: ${UserData.token}');
 
-      // ✅ 로그인 직후 전역 위치/WS 시작 (홈에 안 가도 위치 전송)
+      // ✅ 선택: 로그인 직후 전역 위치/WS 시작 (홈에 안 가도 위치 전송)
       try {
         await GlobalLocationBootstrap.instance.start();
       } catch (e) {
@@ -56,14 +73,18 @@ class _LoginPageState extends State<LoginPage> {
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => RootPage()),
+        MaterialPageRoute(builder: (_) => RootPage()),
       );
-    } else {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('❗계정이 존재하지 않거나 비밀번호가 틀렸습니다')),
-      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
   }
 
   @override
@@ -77,8 +98,11 @@ class _LoginPageState extends State<LoginPage> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // 로고
                 Image.asset('assets/images/logo.png', height: 55),
                 const SizedBox(height: 60),
+
+                // 아이디
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -88,6 +112,8 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 TextField(
                   controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  textInputAction: TextInputAction.next,
                   decoration: const InputDecoration(
                     isDense: true,
                     contentPadding: EdgeInsets.symmetric(vertical: 10),
@@ -100,6 +126,8 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
                 const SizedBox(height: 30),
+
+                // 비밀번호
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -110,6 +138,7 @@ class _LoginPageState extends State<LoginPage> {
                 TextField(
                   controller: _passwordController,
                   obscureText: true,
+                  onSubmitted: (_) => _login(),
                   decoration: const InputDecoration(
                     isDense: true,
                     contentPadding: EdgeInsets.symmetric(vertical: 10),
@@ -122,41 +151,62 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
                 const SizedBox(height: 20),
+
+                // 링크 (회원가입 동작 추가)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: const [
-                    Text(
+                  children: [
+                    const Text(
                       '아이디 찾기 | 비밀번호 찾기 | ',
                       style: TextStyle(fontSize: 13, color: Color(0xFFBDBDBD)),
                     ),
-                    Text(
-                      '회원가입',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFFBDBDBD),
-                        fontWeight: FontWeight.bold,
+                    GestureDetector(
+                      onTap:
+                          () => Navigator.pushNamed(
+                            context,
+                            '/start',
+                          ), // ✅ 회원가입 이동
+                      child: const Text(
+                        '회원가입',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF54D2A7),
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 70),
+
+                // 로그인 버튼
                 SizedBox(
                   width: double.infinity,
                   height: 55,
                   child: ElevatedButton(
-                    onPressed: _login,
+                    onPressed: _loading ? null : _login,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF54D2A7),
                       shape: const StadiumBorder(),
                     ),
-                    child: const Text(
-                      '로그인',
-                      style: TextStyle(
-                        fontSize: 18,
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                    child:
+                        _loading
+                            ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                            : const Text(
+                              '로그인',
+                              style: TextStyle(
+                                fontSize: 18,
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                   ),
                 ),
               ],

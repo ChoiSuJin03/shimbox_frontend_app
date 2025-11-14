@@ -1,4 +1,3 @@
-// lib/services/location_socket_service.dart
 import 'dart:async';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -7,8 +6,6 @@ import 'package:web_socket_channel/status.dart' as ws_status;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimbox_app/models/test_user_data.dart' as localUser;
 import 'package:shimbox_app/utils/api_service.dart';
-
-// ✅ 건강 데이터 읽기용
 import 'package:shimbox_app/pages/health/health_service.dart';
 
 class LocationSocketService {
@@ -20,58 +17,45 @@ class LocationSocketService {
   Timer? _pingTimer;
   Timer? _reconnectTimer;
 
-  // 위치: 1분 주기 전송
   Timer? _locationPeriodicTimer;
   static const Duration _locationPeriodicInterval = Duration(minutes: 1);
 
-  // 건강: 선택적 주기 전송 (HealthPage에서만 start/stop)
   Timer? _healthPeriodicTimer;
   Duration _healthPeriodicInterval = const Duration(seconds: 30);
 
-  // 최신 위치/주소 캐시
   double? _latestLat;
   double? _latestLng;
   String? _latestAddress;
 
-  // 홈 진입 시 즉시 1회 전송 예약 플래그(위치용)
   bool _pendingEnterSend = false;
 
-  // 연결 정보
   String? _region;
   String? _token;
   Uri? _wsUri;
 
-  // 연결 상태 플래그(채널 객체만으로는 부족)
   bool _opened = false;
   bool get isConnected => _opened && _ch != null;
 
-  // 재연결 지수 백오프 (1s ~ 30s)
   int _retryMs = 1000;
 
-  // ✅ 건강 데이터 소스
   final HealthService _health = HealthService();
 
-  // ✅ 최신 피로도 캐시 (HealthPage에서 업데이트)
-  double? _latestFatigueScore; // 0.0~1.0
-  String? _latestFatigueLevel; // 좋음/보통/주의/위험 (서버표준은 "좋음/경고/위험" 사용)
+  double? _latestFatigueScore;
+  String? _latestFatigueLevel;
 
-  // ───────────────────────────────────────────
-  // 외부에서 최신 피로도 값을 반영
-  // ───────────────────────────────────────────
+  /// ✅ 캐시된 driverId (driverId 누락 시 fallback)
+  int? _lastDriverIdHint;
+
   void updateFatigue({required double score, required String level}) {
     _latestFatigueScore = score;
     _latestFatigueLevel = level;
   }
 
-  // ───────────────────────────────────────────
-  // 홈/메인에서 호출: "즉시 1회" 전송 예약 (위치)
-  // ───────────────────────────────────────────
   void markHomeEntered() {
     _pendingEnterSend = true;
     _trySendEnterNow();
   }
 
-  // 컨트롤러가 최신 좌표/주소를 알려줄 때 호출
   void updateLatestPosition({
     required double lat,
     required double lng,
@@ -82,10 +66,21 @@ class LocationSocketService {
     if (addressShort != null && addressShort.isNotEmpty) {
       _latestAddress = addressShort;
     }
-    _trySendEnterNow(); // 좌표가 갱신되면, 예약된 1회 전송을 시도
+
+    unawaited(() async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setDouble('last_lat', lat);
+        await prefs.setDouble('last_lng', lng);
+        if (_latestAddress != null && _latestAddress!.isNotEmpty) {
+          await prefs.setString('last_addr_short', _latestAddress!);
+        }
+      } catch (_) {}
+    }());
+
+    _trySendEnterNow();
   }
 
-  // 지금 가진 최신 좌표를 즉시 1회 전송
   void sendLatestNow() {
     if (_ch == null) return;
     if (_latestLat == null || _latestLng == null) return;
@@ -97,7 +92,6 @@ class LocationSocketService {
     );
   }
 
-  // 예약된 "홈 진입 1회" 전송을 조건 만족 시 실행
   void _trySendEnterNow() {
     if (!_pendingEnterSend) return;
     if (!isConnected) {
@@ -113,9 +107,6 @@ class LocationSocketService {
     _pendingEnterSend = false;
   }
 
-  // ───────────────────────────────────────────
-  // 연결
-  // ───────────────────────────────────────────
   Uri _buildWsUri({required String token, required String region}) {
     final httpUri = Uri.parse(ApiService.baseUrl);
     final isSecure = httpUri.scheme == 'https';
@@ -127,7 +118,6 @@ class LocationSocketService {
       host: host,
       port: port,
       path: '/ws/location',
-      // 서버 가이드: 기사(mobile)는 반드시 region 필요
       queryParameters: {'token': token, 'as': 'mobile', 'region': region},
     );
   }
@@ -154,15 +144,11 @@ class LocationSocketService {
       _ch = WebSocketChannel.connect(_wsUri!);
       print('[WS] connected (channel created)');
 
-      // 채널 생성 성공 → 일단 열린 상태로 간주, 백오프 리셋
       _opened = true;
       _retryMs = 1000;
 
       _sub = _ch!.stream.listen(
-        (event) {
-          // 서버 수신 처리 필요 시 사용
-          // print('[WS] <= $event');
-        },
+        (event) {},
         onDone: _scheduleReconnect,
         onError: (e, st) {
           print('[WS] error: $e');
@@ -171,7 +157,6 @@ class LocationSocketService {
         cancelOnError: true,
       );
 
-      // keepalive ping (30초)
       _pingTimer?.cancel();
       _pingTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         try {
@@ -179,16 +164,13 @@ class LocationSocketService {
         } catch (_) {}
       });
 
-      // 위치: 연결 직후 예약된 1회 전송 수행
       Future.microtask(_trySendEnterNow);
 
-      // 위치: 1분 주기 전송 시작
       _locationPeriodicTimer?.cancel();
-      _locationPeriodicTimer = Timer.periodic(_locationPeriodicInterval, (_) {
-        sendLatestNow();
-      });
-
-      // 건강 자동 전송은 HealthPage에서 on/off
+      _locationPeriodicTimer = Timer.periodic(
+        _locationPeriodicInterval,
+        (_) => sendLatestNow(),
+      );
     } catch (e) {
       print('[WS] connect failed: $e');
       _scheduleReconnect();
@@ -202,17 +184,12 @@ class LocationSocketService {
 
   Future<void> _disposeChannel() async {
     print('[WS] _disposeChannel()');
-
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();
     _pingTimer = null;
-
     _locationPeriodicTimer?.cancel();
-    _locationPeriodicTimer = null;
-
     _healthPeriodicTimer?.cancel();
     _healthPeriodicTimer = null;
-
     await _sub?.cancel();
     _sub = null;
 
@@ -230,15 +207,44 @@ class LocationSocketService {
     _reconnectTimer?.cancel();
     final delay = Duration(milliseconds: _retryMs);
     print('[WS] reconnect in ${delay.inMilliseconds}ms');
-    _reconnectTimer = Timer(delay, () async {
-      await connect(region: _region!);
-    });
+    _reconnectTimer = Timer(delay, () async => await connect(region: _region!));
     _retryMs = (_retryMs * 2).clamp(1000, 30000);
   }
 
-  // ───────────────────────────────────────────
+  // --------------------------
+  // ✅ 공통 신원 필드 (driverId 캐시 포함)
+  // --------------------------
+  Map<String, dynamic> _identityFields() {
+    final driverId = localUser.UserData.driverId;
+    final driverName = localUser.UserData.name;
+    final region = _region;
+
+    if (driverId != null) _lastDriverIdHint = driverId;
+
+    return {
+      if (driverId != null) 'driverId': driverId,
+      if (driverId != null) 'userId': driverId, // ★ userId = driverId로 함께 전송
+      if (driverName != null && driverName.isNotEmpty) 'driverName': driverName,
+      if (region != null && region.isNotEmpty) 'region': region,
+      if (_token != null && _token!.isNotEmpty) 'token': _token,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    };
+  }
+
+  Map<String, dynamic> _withDriverIdFallback(Map<String, dynamic> base) {
+    final hasDriver = base.containsKey('driverId') && base['driverId'] != null;
+    if (!hasDriver && _lastDriverIdHint != null) {
+      base['driverId'] = _lastDriverIdHint;
+      print(
+        '[HEALTH-WS] ⚠️ driverId missing → fallback to cached driverId=${_lastDriverIdHint}',
+      );
+    }
+    return base;
+  }
+
+  // --------------------------
   // 위치 전송
-  // ───────────────────────────────────────────
+  // --------------------------
   void sendLocation({
     required double lat,
     required double lng,
@@ -248,21 +254,17 @@ class LocationSocketService {
     final ch = _ch;
     if (ch == null) return;
 
-    print('[WS][LOC] try send (connected=${_ch != null}) lat=$lat lng=$lng');
-
-    final msg = {
-      'type': 'location',
-      'payload': {
-        'lat': lat,
-        'lng': lng,
-        // ✅ 키 통일 (camelCase)
-        'capturedAt': capturedAtUtc.toIso8601String(),
-        if (addressShort != null && addressShort.isNotEmpty)
-          'addressShort': addressShort,
-      },
+    final payload = {
+      ..._identityFields(),
+      'lat': lat,
+      'lng': lng,
+      'capturedAt': capturedAtUtc.toIso8601String(),
+      if (addressShort != null && addressShort.isNotEmpty)
+        'addressShort': addressShort,
     };
 
     try {
+      final msg = {'type': 'location', 'payload': payload};
       ch.sink.add(jsonEncode(msg));
       print('[WS][LOC] => $msg');
     } catch (e) {
@@ -270,59 +272,48 @@ class LocationSocketService {
     }
   }
 
-  // ───────────────────────────────────────────
-  // ✅ 건강 전송 (스로틀 포함) — score/level/capturedAt로 통일
-  // ───────────────────────────────────────────
-
+  // --------------------------
+  // ✅ 건강/피로도 전송
+  // --------------------------
   DateTime? _lastHealthSentAt;
   bool _healthInFlight = false;
-  Duration _healthMinGap = const Duration(seconds: 3); // 최소 간격
+  Duration _healthMinGap = const Duration(seconds: 3);
 
-  /// 건강 데이터 즉시 1회 전송 (심박/걸음수/피로도)
   Future<void> sendHealthNow() async {
     final ch = _ch;
     if (ch == null) return;
 
-    // 최소 간격 보장 (스로틀)
     final now = DateTime.now();
     if (_lastHealthSentAt != null &&
         now.difference(_lastHealthSentAt!) < _healthMinGap) {
-      print('[HEALTH-WS] throttled (min gap ${_healthMinGap.inSeconds}s)');
+      print('[HEALTH-WS] throttled');
       return;
     }
-
-    // 중복 실행 방지
     if (_healthInFlight) {
       print('[HEALTH-WS] skip (in-flight)');
       return;
     }
-
-    print('[HEALTH-WS] try send (connected=${_ch != null})');
 
     _healthInFlight = true;
     try {
       final steps = await _health.getTodaySteps();
       final hr = await _health.getCurrentHeartRate();
 
-      // ✅ 웹/서버 스키마와 키 통일 (camelCase)
-      final msg = {
-        'type': 'health',
-        'payload': {
-          'heartRate': hr,
-          'step': steps,
-          if (_latestFatigueScore != null) 'score': _latestFatigueScore,
-          if (_latestFatigueLevel != null) 'level': _latestFatigueLevel,
-          'capturedAt': DateTime.now().toUtc().toIso8601String(),
-        },
-      };
+      final payload = _withDriverIdFallback({
+        ..._identityFields(),
+        'heartRate': hr,
+        'step': steps,
+        if (_latestFatigueScore != null) 'score': _latestFatigueScore,
+        if (_latestFatigueLevel != null) 'level': _latestFatigueLevel,
+        'capturedAt': DateTime.now().toUtc().toIso8601String(),
+      });
 
+      final msg = {'type': 'health', 'payload': payload};
       ch.sink.add(jsonEncode(msg));
-      // ▼ 성공 로그: 전체 JSON + 별도 fatigue 로그
-      print('[HEALTH-WS] => ${jsonEncode(msg)}');
-      if (_latestFatigueScore != null && _latestFatigueLevel != null) {
-        print(
-          '[HEALTH-WS] fatigue score: ${_latestFatigueScore!.toStringAsFixed(3)}, fatigue level: $_latestFatigueLevel',
-        );
+      print('[HEALTH-WS] ✅ sent ${jsonEncode(msg)}');
+
+      if (payload['driverId'] != null) {
+        _lastDriverIdHint = payload['driverId'] as int?;
       }
 
       _lastHealthSentAt = DateTime.now();
@@ -333,24 +324,59 @@ class LocationSocketService {
     }
   }
 
-  /// (선택) 건강 데이터 주기 전송 시작 — HealthPage에서만 켜세요.
   void startHealthPeriodic({Duration interval = const Duration(seconds: 30)}) {
     _healthPeriodicInterval = interval;
     _healthPeriodicTimer?.cancel();
-    _healthPeriodicTimer = Timer.periodic(_healthPeriodicInterval, (_) {
-      sendHealthNow();
-    });
+    _healthPeriodicTimer = Timer.periodic(
+      _healthPeriodicInterval,
+      (_) => sendHealthNow(),
+    );
     print(
       '[HEALTH-WS] start periodic every ${_healthPeriodicInterval.inSeconds}s',
     );
   }
 
-  /// (선택) 건강 데이터 주기 전송 중지
   void stopHealthPeriodic() {
-    if (_healthPeriodicTimer != null) {
-      print('[HEALTH-WS] stop periodic');
-    }
     _healthPeriodicTimer?.cancel();
     _healthPeriodicTimer = null;
+  }
+
+  // --------------------------
+  // ✅ 낙상 이벤트 전송 (driverId 자동 보강)
+  // --------------------------
+  Future<void> sendHealthFall({
+    required bool isDetected,
+    DateTime? capturedAtUtc,
+  }) async {
+    final ch = _ch;
+    if (ch == null) return;
+
+    try {
+      final steps = await _health.getTodaySteps();
+      final hr = await _health.getCurrentHeartRate();
+
+      var payload = {
+        ..._identityFields(),
+        'heartRate': hr,
+        'step': steps,
+        if (_latestFatigueScore != null) 'score': _latestFatigueScore,
+        if (_latestFatigueLevel != null) 'level': _latestFatigueLevel,
+        'isFallDetected': isDetected,
+        'capturedAt':
+            (capturedAtUtc ?? DateTime.now().toUtc()).toIso8601String(),
+      };
+
+      payload = _withDriverIdFallback(payload);
+
+      final msg = {'type': 'health', 'payload': payload};
+      ch.sink.add(jsonEncode(msg));
+      print('[HEALTH-WS][FALL] ✅ sent ${jsonEncode(msg)}');
+
+      if (payload['driverId'] != null) {
+        _lastDriverIdHint = payload['driverId'] as int?;
+      }
+    } catch (e) {
+      print('[HEALTH-WS][FALL] send failed: $e');
+    }
   }
 }

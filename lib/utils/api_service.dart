@@ -41,16 +41,56 @@ class ApiService {
     return t;
   }
 
+  // -------------------- 토큰 보장 --------------------
+  static Future<void> _ensureToken() async {
+    if (localUser.UserData.token != null &&
+        localUser.UserData.token!.isNotEmpty) {
+      return;
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final t = prefs.getString('token');
+      if (t != null && t.isNotEmpty) {
+        localUser.UserData.token = t;
+      }
+    } catch (_) {}
+  }
+
+  static Map<String, String> _authHeaders({
+    bool json = true,
+    bool acceptAny = false,
+  }) {
+    return {
+      if (json) 'Content-Type': 'application/json; charset=utf-8',
+      if (acceptAny) 'Accept': '*/*',
+      'Authorization': 'Bearer ${localUser.UserData.token}',
+    };
+  }
+
   // -------------------- 공통 간단 POST --------------------
   static Future<bool> post(String endpoint, Map<String, dynamic> body) =>
       _post(endpoint, body);
 
-  static Future<bool> _post(String endpoint, Map<String, dynamic> body) async {
+  // ✅ 변경: withAuth 파라미터 추가 및 Authorization 조건부 첨부
+  static Future<bool> _post(
+    String endpoint,
+    Map<String, dynamic> body, {
+    bool withAuth = true,
+  }) async {
     final url = Uri.parse('$baseUrl$endpoint');
     try {
+      if (withAuth) {
+        await _ensureToken();
+      }
+      final hasToken = (localUser.UserData.token?.isNotEmpty ?? false);
+
       final response = await http.post(
         url,
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          if (withAuth && hasToken)
+            'Authorization': 'Bearer ${localUser.UserData.token}',
+        },
         body: jsonEncode(body),
       );
       if (response.statusCode == 200) return true;
@@ -65,8 +105,9 @@ class ApiService {
   }
 
   // -------------------- 인증 --------------------
+  // ✅ 변경: 회원가입은 인증 없이 호출
   static Future<bool> registerUser(SignupData data) =>
-      _post('/api/v1/auth/save', data.toJson());
+      _post('/api/v1/auth/save', data.toJson(), withAuth: false);
 
   static Future<LoginResponse?> loginUser(LoginData data) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/login');
@@ -94,6 +135,10 @@ class ApiService {
     final request = http.MultipartRequest('POST', url)
       ..files.add(await http.MultipartFile.fromPath('file', file.path));
     try {
+      // 업로드에 토큰이 필요하면 주석 해제
+      await _ensureToken();
+      request.headers['Authorization'] = 'Bearer ${localUser.UserData.token}';
+
       final response = await request.send();
       if (response.statusCode != 200) return null;
       final body = await response.stream.bytesToString();
@@ -128,6 +173,7 @@ class ApiService {
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/product/status');
     try {
+      await _ensureToken();
       final normalized = _normalizeStatus(status);
       final body = <String, dynamic>{
         'productId': productId,
@@ -189,6 +235,7 @@ class ApiService {
       '$baseUrl$endpoint${sep}_ts=${DateTime.now().millisecondsSinceEpoch}',
     );
     try {
+      await _ensureToken();
       final res = await http
           .get(
             url,
@@ -247,6 +294,7 @@ class ApiService {
   ) async {
     final url = Uri.parse('$baseUrl$endpoint');
     try {
+      await _ensureToken();
       final res = await http.patch(
         url,
         headers: {
@@ -270,6 +318,12 @@ class ApiService {
 
     if (sc == 401 || sc == 403) {
       debugPrint('🔐 summary 인증/권한 실패(status=$sc): ${response['message']}');
+      return const [];
+    }
+
+    if (sc == 404) {
+      // 배정이 없을 때 서버가 404를 주는 사양 → 빈 리스트가 정상
+      debugPrint('ℹ️ summary: 배정 없음(404)');
       return const [];
     }
 
@@ -376,6 +430,7 @@ class ApiService {
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/realtime');
     try {
+      await _ensureToken();
       final res = await http.post(
         url,
         headers: {
@@ -403,6 +458,7 @@ class ApiService {
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/driver/attendance');
     try {
+      await _ensureToken();
       final body = <String, dynamic>{
         'status': status.trim(),
         if (latitude != null) 'latitude': latitude,
@@ -425,7 +481,10 @@ class ApiService {
       } catch (_) {}
 
       final sc = decoded?['statusCode'] ?? res.statusCode;
-      final ok = sc == 0 || sc == 200;
+      final ok =
+          sc == 0 ||
+          sc == 200 ||
+          (res.statusCode >= 200 && res.statusCode < 300);
       if (!ok) {
         debugPrint('❌ updateAttendanceStatus 실패: $sc, ${res.body} (req=$body)');
       } else {
@@ -438,9 +497,7 @@ class ApiService {
     }
   }
 
-  // -------------------- 건강 설문 (시그니처 변경) --------------------
-  /// POST /api/v1/driver/health/survey
-  /// finish1/2/3 + step(총 걸음수) + heartRate(오늘 평균 심박수) + conditionStatus
+  // -------------------- 건강 설문 --------------------
   static Future<bool> submitHealthSurvey({
     required String finish1,
     required String finish2,
@@ -461,6 +518,7 @@ class ApiService {
     };
 
     try {
+      await _ensureToken();
       final res = await http.post(
         url,
         headers: {
@@ -526,17 +584,6 @@ class ApiService {
     return DriverProfileResponse.fromJson(resp);
   }
 
-  static Map<String, String> _authHeaders({
-    bool json = true,
-    bool acceptAny = false,
-  }) {
-    return {
-      if (json) 'Content-Type': 'application/json; charset=utf-8',
-      if (acceptAny) 'Accept': '*/*',
-      'Authorization': 'Bearer ${localUser.UserData.token}',
-    };
-  }
-
   static Future<bool> updateDriverProfile({
     required int driverId,
     int? heightCm,
@@ -559,6 +606,7 @@ class ApiService {
     }
 
     try {
+      await _ensureToken();
       final res = await http.patch(
         url,
         headers: _authHeaders(),
@@ -674,6 +722,7 @@ class ApiService {
   static Future<bool> logout() async {
     final url = Uri.parse('$baseUrl/api/v1/auth/logout');
     try {
+      await _ensureToken();
       final res = await http.post(url, headers: _authHeaders());
 
       try {
