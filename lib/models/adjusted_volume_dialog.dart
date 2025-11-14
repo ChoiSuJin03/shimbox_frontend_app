@@ -223,7 +223,7 @@ class AdjustedVolumeDialog extends StatelessWidget {
       children.add(const SizedBox(height: 6));
 
       if (decreased) {
-        // 🔻 감소 케이스: "4건 다운 6건이 되었어요."
+        // 🔻 감소 케이스: "4건 ↓ 6건이 되었어요." (텍스트 '다운' 제거)
         children.add(
           RichText(
             text: TextSpan(
@@ -241,7 +241,7 @@ class AdjustedVolumeDialog extends StatelessWidget {
                     ),
                   ),
                 ),
-                const TextSpan(text: ' 다운 '),
+                const TextSpan(text: ' '),
                 // 아이콘(아래 화살표)
                 WidgetSpan(
                   alignment: PlaceholderAlignment.middle,
@@ -262,13 +262,14 @@ class AdjustedVolumeDialog extends StatelessWidget {
           ),
         );
       } else if (increased) {
-        // 🔺 증가 케이스: "3건 업 15건이 되었어요."
+        // 🔺 증가 케이스: "3건 ↑ 15건이 되었어요." (텍스트 '업' 제거)
         children.add(
           RichText(
             text: TextSpan(
               style: baseStyle,
               children: [
                 const TextSpan(text: '배정건수가 '),
+                // 변화량
                 WidgetSpan(
                   alignment: PlaceholderAlignment.middle,
                   child: Text(
@@ -279,12 +280,14 @@ class AdjustedVolumeDialog extends StatelessWidget {
                     ),
                   ),
                 ),
-                const TextSpan(text: ' 업 '),
+                const TextSpan(text: ' '),
+                // 아이콘(위 화살표)
                 WidgetSpan(
                   alignment: PlaceholderAlignment.middle,
                   child: Icon(arrowIcon, size: 14, color: changeColor),
                 ),
                 const TextSpan(text: ' '),
+                // 최종 값
                 WidgetSpan(
                   alignment: PlaceholderAlignment.middle,
                   child: Text(

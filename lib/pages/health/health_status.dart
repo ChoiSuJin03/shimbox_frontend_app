@@ -95,7 +95,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
   // ── 피로도 알림/팝업 제어 ─────────────────────────────────────────
   String? _prevFatigueLevel; // 이전 등급 기억
   DateTime? _lastAlarmInsertedAt; // 최근 알림 추가 시각
-  static const Duration _alarmDebounce = Duration(minutes: 5);
+  static const Duration _alarmDebounce = Duration(minutes: 10);
 
   // 팝업 디바운스
   DateTime? _lastPopupAt;
@@ -106,7 +106,9 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
 
   // ✅ 추가: 잠금 해제 타이머와 잠금 지속 시간
   Timer? _dangerUnlockTimer;
-  static const Duration _dangerLockDuration = Duration(minutes: 5);
+  static const Duration _dangerLockDuration = Duration(
+    minutes: 10,
+  ); // ★ 변경: 위험 잠금 10분 유지
 
   // ── “이번 주 0분이면 초기화” 안전가드용 플래그 ─────────────────────
   bool _emptyWeekSeenOnce = false;
@@ -1192,7 +1194,7 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     );
   }
 
-  // ★ 3단계 + 2줄 메시지 + 위험 5분 잠금(유지)
+  // ★ 3단계 + 2줄 메시지 + 위험 10분 잠금(유지)
   void _applyFatigueView(double s) {
     String newLvl;
     Color newCol;
@@ -1319,10 +1321,10 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
       }
       final hrComp = math.max(hrSlope, hrBoost);
 
-      // ✅ 심박이 충분히 내려왔으면(급성/심각 아님) 잠금 조기 해제
-      if (_dangerLockedUntil != null && !severeDelta && !acuteDelta) {
-        _dangerLockedUntil = null;
-      }
+      // ✅ (변경) 심박이 내려와도 10분 잠금 유지 위해 조기 해제 로직 비활성화
+      // if (_dangerLockedUntil != null && !severeDelta && !acuteDelta) {
+      //   _dangerLockedUntil = null;
+      // }
 
       final workComp = _clamp01((workMin - 180) / (600 - 180)); // 3h→0, 10h→1
       final delivComp = _clamp01(deliveries / 120.0); // 0~120건
@@ -1441,9 +1443,6 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
     return '낙상 의심 신호가 감지되었습니다.\n안전을 먼저 확인하세요.';
   }
 
-  // ✅ 낙상 팝업: 커스텀 다이얼로그 사용
-  //   - 이제 여기서는 "false"를 직접 보내지 않고
-  //   - 다이얼로그 쪽에서 onResolve 콜백을 통해 false 전송
   Future<void> _showFallAlert({required String subtitle}) async {
     // 포그라운드 + 현재 화면일 때만 팝업
     final appState = WidgetsBinding.instance.lifecycleState;
@@ -1481,14 +1480,5 @@ class _HealthPageState extends State<HealthPage> with WidgetsBindingObserver {
         _pushAlarmItem('낙상 의심 감지', '안전을 먼저 확인하세요.');
       },
     );
-
-    // ❌ 기존: 팝업 닫힌 직후 여기서 false 보내던 부분 제거
-    // await LocationSocketService.instance.sendHealthFall(
-    //   isDetected: false,
-    //   capturedAtUtc: DateTime.now().toUtc(),
-    // );
-    // _pushAlarmItem('낙상 의심 감지', '안전을 먼저 확인하세요.');
   }
-
-  // ────────────────────────────────────────────────────────────────
 }
