@@ -63,7 +63,9 @@
 
 **예시 화면**
 
+<p align="center"> 
 <img src="./images/app_home_on_duty.png" width="22%">
+</p>
 
 ---
 
@@ -78,11 +80,11 @@
 
 **예시 화면**
 
-<!-- <p align="center"> -->
+<p align="center"> 
   <img src="./images/app_delivery_list.png" width="22%">
   &nbsp;&nbsp;&nbsp;
   <img src="./images/app_delivery_detail.png" width="22%">
-<!-- </p> -->
+</p>
 
 ---
 
@@ -117,7 +119,9 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 **예시 화면**
 
+<p align="center"> 
 <img src="./images/app_health_report.png" width="22%">
+</p>
 
 ---
 
@@ -132,7 +136,9 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 **예시 화면**
 
+<p align="center"> 
 <img src="./images/app_survey.png" width="22%">
+</p>
 
 ---
 
