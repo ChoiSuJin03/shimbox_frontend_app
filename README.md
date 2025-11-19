@@ -46,7 +46,7 @@
 **예시 화면**
 
 ![회원가입 화면](./images/app_signup.png)
-<img src="./images/app_login.png" width="21.5%" height="2%" />
+<img src="./images/app_login.png" width="21.5%" marginTop="2%" />
 
 ---
 
