@@ -1,6 +1,9 @@
 # 📦 SHIM BOX – 스마트 물류 앱 (Flutter)
 
-![SHIM BOX 메인](./images/shimbox_app_cover.png)
+![SHIM BOX 메인]
+<p align="center">
+  <img src="./images/shimbox_app_cover.png" width="45%" />
+</p>
 
 **쉼박스(SHIM BOX)** 는 택배기사의 건강 데이터와 근무 패턴을 기반으로  
 **개인 맞춤형 물량 배정**을 지원하는 스마트 물류 앱입니다.
@@ -45,8 +48,10 @@
 
 **예시 화면**
 
-![회원가입 화면](./images/app_signup.png)  
-![로그인 화면](./images/app_login.png)
+<p align="center">
+  ![회원가입 화면]<img src="./images/app_signup.png" width="45%" />
+  ![로그인 화면]<img src="./images/app_login.png" width="45%" />
+</p>
 
 ---
 
