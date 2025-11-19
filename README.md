@@ -46,7 +46,8 @@
 **예시 화면**
 
 ![회원가입 화면](./images/app_signup.png)
-<img src="./images/app_login.png" width="21.5%" marginTop="2%" />
+&nbsp;&nbsp;&nbsp;
+<img src="./images/app_login.png" width="21.5%"/>
 
 ---
 
@@ -62,8 +63,10 @@
 
 **예시 화면**
 
-![출근 후 메인 화면](./images/app_home_on_duty.png)  
-![퇴근 전 메인 화면](./images/app_home_off_duty.png)
+<p align="center">
+  <img src="./images/app_home_on_duty.png" width="21.5%">
+  <img src="./images/app_home_off_duty.png" width="21.5%">
+</p>
 
 ---
 
