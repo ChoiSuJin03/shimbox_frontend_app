@@ -63,7 +63,7 @@
 
 **예시 화면**
 
-  <img src="./images/app_home_on_duty.png" width="22%">
+<img src="./images/app_home_on_duty.png" width="22%">
 
 ---
 
@@ -78,8 +78,11 @@
 
 **예시 화면**
 
-![배송 목록 화면](./images/app_delivery_list.png)  
-![배송 상세 화면](./images/app_delivery_detail.png)
+<p align="center">
+  <img src="./images/app_delivery_list.png" width="22%">
+  &nbsp;&nbsp;&nbsp;
+  <img src="./images/app_delivery_detail.png" width="22%">
+</p>
 
 ---
 
@@ -94,8 +97,12 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 **예시 화면**
 
-![최적 경로 안내 화면](./images/app_route_optimization.png)
-![최적 경로 안내 화면](./images/app_route_optimization2.png)
+<p align="center">
+  <img src="./images/app_route_optimization.png" width="22%">
+  &nbsp;&nbsp;&nbsp;
+  <img src="./images/app_route_optimization2.png" width="22%">
+</p>
+
 ---
 
 ### 5️⃣ 건강 리포트
@@ -110,7 +117,7 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 **예시 화면**
 
-![건강 리포트 화면](./images/app_health_report.png)
+<img src="./images/app_health_report.png" width="22%">
 
 ---
 
@@ -125,7 +132,7 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 **예시 화면**
 
-![퇴근 설문 화면](./images/app_survey.png)
+<img src="./images/app_survey.png" width="22%">
 
 ---
 
@@ -142,13 +149,3 @@ TSP 휴리스틱 기반의 **최적 동선**을 제공합니다.
 
 ---
 
-## 🧩 디렉토리 구조 (예시)
-
-```bash
-lib/
- ├── screens/       # 각 화면 (로그인, 메인, 배송 목록, 건강 리포트 등)
- ├── widgets/       # 공통 UI 컴포넌트
- ├── services/      # API 통신, 삼성헬스 연동 등
- ├── models/        # 데이터 모델 정의
- ├── providers/     # 상태 관리
- └── utils/         # 공통 유틸 함수
