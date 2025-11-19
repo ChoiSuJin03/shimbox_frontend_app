@@ -78,11 +78,11 @@
 
 **예시 화면**
 
-<p align="center">
+<!-- <p align="center"> -->
   <img src="./images/app_delivery_list.png" width="22%">
   &nbsp;&nbsp;&nbsp;
   <img src="./images/app_delivery_detail.png" width="22%">
-</p>
+<!-- </p> -->
 
 ---
 
